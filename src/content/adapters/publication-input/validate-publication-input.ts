@@ -4,12 +4,12 @@ import { join, posix, resolve } from "node:path";
 
 import Ajv, { type ErrorObject, type JSONSchemaType } from "ajv";
 
+import { listSafeFiles } from "../../../infrastructure/list-safe-files";
 import type {
   HomePublicationInput,
   VerifiedAsset,
   VerifiedPublicationInput,
-} from "../../model/publication";
-import { listSafeFiles } from "../../../infrastructure/list-safe-files";
+} from "./publication-input";
 
 interface ManifestFile {
   readonly path: string;

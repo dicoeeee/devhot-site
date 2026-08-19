@@ -45,6 +45,22 @@ export const checkArchitecture = async (): Promise<void> => {
     }
   }
 
+  const stableContentRoots = ["model", "ports"].map((directory) =>
+    join(projectRoot, "src", "content", directory),
+  );
+  const physicalLayoutPattern =
+    /\b(?:HomePublicationInput|VerifiedPublicationInput|VerifiedAsset|fullPath|logoAssetPath)\b/;
+  for (const root of stableContentRoots) {
+    for (const file of await listSourceFiles(root)) {
+      const source = await readFile(file, "utf8");
+      if (physicalLayoutPattern.test(source)) {
+        throw new Error(
+          `${relative(projectRoot, file)} exposes physical publication-input layout from a stable content boundary`,
+        );
+      }
+    }
+  }
+
   const packageJson = JSON.parse(
     await readFile(join(projectRoot, "package.json"), "utf8"),
   ) as { readonly scripts?: Record<string, string> };

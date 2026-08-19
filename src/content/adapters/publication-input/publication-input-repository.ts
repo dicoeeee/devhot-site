@@ -1,6 +1,6 @@
 import type { HomePage } from "../../model/home-page";
-import type { VerifiedPublicationInput } from "../../model/publication";
 import type { SiteContentRepository } from "../../ports/site-content-repository";
+import type { VerifiedPublicationInput } from "./publication-input";
 
 export const createPublicationInputRepository = (
   input: VerifiedPublicationInput,
