@@ -1,0 +1,31 @@
+name: publication-gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    name: npm run gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    container:
+      image: node:24.19.0-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
+    env:
+      ASTRO_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Check out the candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Verify runtime version
+        run: test "$(node --version)" = "v24.19.0"
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run the single repository gate
+        run: npm run gate

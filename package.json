@@ -1,0 +1,35 @@
+{
+  "name": "devhot-site",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "24.19.0"
+  },
+  "scripts": {
+    "validate:input": "tsx tools/validate-input.ts",
+    "check:format": "prettier --check .",
+    "check:types": "astro check && tsc --noEmit",
+    "check:architecture": "tsx tools/check-architecture.ts",
+    "check": "npm run check:format && npm run check:types && npm run check:architecture",
+    "test": "vitest run",
+    "build:site": "astro build",
+    "copy:assets": "tsx tools/copy-assets.ts",
+    "verify:dist": "tsx tools/verify-dist.ts",
+    "build": "npm run validate:input && npm run build:site && npm run copy:assets && npm run verify:dist",
+    "gate": "npm run validate:input && npm run check && npm run test && npm run build:site && npm run copy:assets && npm run verify:dist"
+  },
+  "dependencies": {
+    "ajv": "8.20.0",
+    "astro": "7.2.3"
+  },
+  "devDependencies": {
+    "@astrojs/check": "0.9.10",
+    "@types/node": "24.13.3",
+    "prettier": "3.9.6",
+    "prettier-plugin-astro": "0.14.1",
+    "tsx": "4.23.12",
+    "typescript": "6.0.3",
+    "vitest": "4.1.11"
+  }
+}

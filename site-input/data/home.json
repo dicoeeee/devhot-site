@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "domain": {
+    "id": "software-engineering",
+    "name": "软件工程",
+    "url": "/software-engineering/"
+  },
+  "masthead": {
+    "publication": "DEVHOT",
+    "journal": "INSIGHT JOURNAL",
+    "attribution": "公司持续集成管理委员会(CIMC)",
+    "logoAssetPath": "assets/sha256/73bc08f1a558271ed021a4f51fcc4a07d2850deea7cb592282ae0f9d5a110c89.png"
+  },
+  "status": {
+    "label": "已验证发布输入",
+    "updatedAt": "2026-08-19"
+  },
+  "intro": {
+    "kicker": "软件工程 · CURRENT DOMAIN",
+    "headline": "工程洞察，从证据到判断",
+    "summary": "DEVHOT 将已确认、可公开的技术洞察组织成一条可审计、可重复构建的静态阅读路径。"
+  }
+}

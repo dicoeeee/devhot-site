@@ -1,0 +1,24 @@
+---
+import "../styles/global.css";
+
+interface Props {
+  title: string;
+  canonicalPath: string;
+}
+
+const { title, canonicalPath } = Astro.props;
+---
+
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width" />
+    <meta name="description" content="DEVHOT 面向技术读者的公开静态洞察阅读页。" />
+    <link rel="canonical" href={canonicalPath} />
+    <title>{title}</title>
+  </head>
+  <body>
+    <slot />
+  </body>
+</html>

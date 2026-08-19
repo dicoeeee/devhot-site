@@ -1,0 +1,56 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://devhot.example/contracts/home-page.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "domain", "masthead", "status", "intro"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "domain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "url"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "name": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "pattern": "^/[a-z0-9-]+/$" }
+      }
+    },
+    "masthead": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["publication", "journal", "attribution", "logoAssetPath"],
+      "properties": {
+        "publication": { "const": "DEVHOT" },
+        "journal": { "const": "INSIGHT JOURNAL" },
+        "attribution": { "const": "公司持续集成管理委员会(CIMC)" },
+        "logoAssetPath": {
+          "type": "string",
+          "pattern": "^assets/sha256/[a-f0-9]{64}\\.png$"
+        }
+      }
+    },
+    "status": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "updatedAt"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "updatedAt": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+        }
+      }
+    },
+    "intro": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kicker", "headline", "summary"],
+      "properties": {
+        "kicker": { "type": "string", "minLength": 1 },
+        "headline": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

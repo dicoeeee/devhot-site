@@ -1,0 +1,67 @@
+---
+import { createSiteContentRepository } from "../content/composition-root";
+import type { HomePage } from "../content/model/home-page";
+import SiteLayout from "../layouts/SiteLayout.astro";
+
+export async function getStaticPaths() {
+  const repository = await createSiteContentRepository();
+  const home = await repository.getHome();
+
+  return [
+    {
+      params: { domain: home.domain.id },
+      props: { home },
+    },
+  ];
+}
+
+interface Props {
+  home: HomePage;
+}
+
+const { home } = Astro.props;
+---
+
+<SiteLayout
+  title={`${home.brand.publication} · ${home.domain.name}`}
+  canonicalPath={home.domain.url}
+>
+  <header class="editorial-bar">
+    <a class="brand-lockup" href={home.domain.url} aria-label="DEVHOT 首页">
+      <img
+        class="brand-logo"
+        src={home.brand.logoUrl}
+        alt="CIMC"
+        width="64"
+        height="64"
+      />
+      <span class="brand-type">
+        <strong>{home.brand.publication}</strong>
+        <span>{home.brand.journal}</span>
+      </span>
+    </a>
+    <p class="attribution">{home.brand.attribution}</p>
+  </header>
+
+  <main>
+    <section class="domain-state" data-domain-status={home.domain.id}>
+      <div>
+        <p class="section-label">CURRENT DOMAIN</p>
+        <a href={home.domain.url} aria-current="page">{home.domain.name}</a>
+      </div>
+      <div class="publication-state">
+        <span>{home.status.label}</span>
+        <time datetime={home.status.updatedAt}>{home.status.updatedAt}</time>
+      </div>
+    </section>
+
+    <article class="lead-story">
+      <p class="kicker">{home.intro.kicker}</p>
+      <h1>{home.intro.headline}</h1>
+      <p class="summary">{home.intro.summary}</p>
+      <p class="fixture-note">
+        当前页面由版本化 Manifest、只读内容端口与 Astro 静态构建共同生成。
+      </p>
+    </article>
+  </main>
+</SiteLayout>

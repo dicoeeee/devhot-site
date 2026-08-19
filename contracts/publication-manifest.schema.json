@@ -1,0 +1,53 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://devhot.example/contracts/publication-manifest.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "publicationId",
+    "builderCompatibility",
+    "entrypoints",
+    "files"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "publicationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "builderCompatibility": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["min", "maxExclusive"],
+      "properties": {
+        "min": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+        "maxExclusive": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"
+        }
+      }
+    },
+    "entrypoints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["home"],
+      "properties": {
+        "home": { "type": "string", "pattern": "^data/[a-z0-9][a-z0-9._/-]*\\.json$" }
+      }
+    },
+    "files": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "mediaType", "sha256"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1 },
+          "mediaType": {
+            "enum": ["application/json", "image/png"]
+          },
+          "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+        }
+      }
+    }
+  }
+}
