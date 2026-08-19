@@ -3,6 +3,8 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { listSafeFiles } from "../src/infrastructure/list-safe-files";
+
 interface PublicationMetadata {
   readonly schemaVersion: 1;
   readonly publicationId: string;
@@ -57,25 +59,6 @@ const parseMetadata = (value: unknown): PublicationMetadata => {
   return metadata as PublicationMetadata;
 };
 
-const listOutputFiles = async (root: string, directory = root): Promise<string[]> => {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const paths: string[] = [];
-  for (const entry of entries) {
-    const fullPath = join(directory, entry.name);
-    if (entry.isSymbolicLink()) {
-      throw new Error(`distribution must not contain symlinks: ${entry.name}`);
-    }
-    if (entry.isDirectory()) {
-      paths.push(...(await listOutputFiles(root, fullPath)));
-    } else if (entry.isFile()) {
-      paths.push(relative(root, fullPath).split(sep).join("/"));
-    } else {
-      throw new Error(`distribution contains unsupported file type: ${entry.name}`);
-    }
-  }
-  return paths.sort();
-};
-
 export const verifyDistribution = async ({
   distRoot,
 }: VerifyDistributionOptions): Promise<PublicationMetadata> => {
@@ -89,7 +72,7 @@ export const verifyDistribution = async ({
     throw new Error("publication metadata contains duplicate routes");
   }
 
-  const outputFiles = await listOutputFiles(distRoot);
+  const outputFiles = await listSafeFiles(distRoot, "distribution");
   const expectedHtmlFiles = metadata.routes
     .map((route) => relative(distRoot, routeToFile(distRoot, route)).split(sep).join("/"))
     .sort();
@@ -101,7 +84,7 @@ export const verifyDistribution = async ({
     /\.(?:css|html|js)$/.test(candidate),
   )) {
     const source = await readFile(join(distRoot, path), "utf8");
-    if (/https?:\/\//i.test(source)) {
+    if (/(?:https?:)?\/\/[a-z0-9]/i.test(source)) {
       throw new Error(`external runtime dependency found in ${path}`);
     }
   }

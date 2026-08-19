@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { readdir, readFile, stat } from "node:fs/promises";
-import { join, posix, relative, resolve, sep } from "node:path";
+import { readFile, stat } from "node:fs/promises";
+import { join, posix, resolve } from "node:path";
 
 import Ajv, { type ErrorObject, type JSONSchemaType } from "ajv";
 
@@ -9,6 +9,7 @@ import type {
   VerifiedAsset,
   VerifiedPublicationInput,
 } from "../../model/publication";
+import { listSafeFiles } from "../../../infrastructure/list-safe-files";
 
 interface ManifestFile {
   readonly path: string;
@@ -68,25 +69,6 @@ const assertSafePath = (path: string): void => {
   }
 };
 
-const listFiles = async (root: string, directory = root): Promise<string[]> => {
-  const entries = await readdir(directory, { withFileTypes: true });
-  const paths: string[] = [];
-  for (const entry of entries) {
-    const fullPath = join(directory, entry.name);
-    if (entry.isSymbolicLink()) {
-      throw new Error(`publication input must not contain symlinks: ${entry.name}`);
-    }
-    if (entry.isDirectory()) {
-      paths.push(...(await listFiles(root, fullPath)));
-    } else if (entry.isFile()) {
-      paths.push(relative(root, fullPath).split(sep).join("/"));
-    } else {
-      throw new Error(`publication input contains unsupported file type: ${entry.name}`);
-    }
-  }
-  return paths.sort();
-};
-
 const sha256 = (value: Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
 
@@ -126,7 +108,7 @@ export const validatePublicationInput = async (
     declaredPaths.add(file.path);
   }
 
-  const actualPaths = await listFiles(root);
+  const actualPaths = await listSafeFiles(root, "publication input");
   const expectedPaths = ["manifest.json", ...declaredPaths].sort();
   if (actualPaths.join("\n") !== expectedPaths.join("\n")) {
     throw new Error(

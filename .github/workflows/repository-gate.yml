@@ -1,4 +1,4 @@
-name: publication-gate
+name: repository-gate
 
 on:
   push:

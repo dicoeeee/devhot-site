@@ -57,6 +57,12 @@ Astro pages → dist/ → output verifier
 `Dockerfile` 同时固定可读 tag 和 digest，并在镜像构建中执行 `npm ci` 与
 `npm run gate`。GitHub Actions 使用同一精确 Node 版本和唯一门禁。
 
+Node 24.19.0 自带的 npm 11.17.0 当前会拒绝部分上游包声明但尚未发布的 optional
+dependency。`package-lock.json` 为 Rolldown
+1.2.5 的两个缺失 binding 保留惰性占位，与 npm/cli
+[#9846](https://github.com/npm/cli/issues/9846)
+记录的兼容形式一致；上游修复并升级依赖后应删除这些占位。
+
 ## 品牌资产
 
 `site-input/assets/sha256/73bc08f1…110c89.png`

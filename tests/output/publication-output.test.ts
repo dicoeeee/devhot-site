@@ -54,16 +54,19 @@ describe("publication output", () => {
     );
   });
 
-  it("rejects a page that introduces a third-party runtime asset", async () => {
-    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
-    await cp(distRoot, tamperedDist, { recursive: true });
-    await appendFile(
-      join(tamperedDist, "software-engineering", "index.html"),
-      '<script src="https://example.com/runtime.js"></script>',
-    );
+  it.each(["https://example.com/runtime.js", "//cdn.example/runtime.js"])(
+    "rejects a page that introduces the third-party runtime asset %s",
+    async (runtimeUrl) => {
+      const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+      await cp(distRoot, tamperedDist, { recursive: true });
+      await appendFile(
+        join(tamperedDist, "software-engineering", "index.html"),
+        `<script src="${runtimeUrl}"></script>`,
+      );
 
-    await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
-      "external runtime dependency",
-    );
-  });
+      await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
+        "external runtime dependency",
+      );
+    },
+  );
 });
