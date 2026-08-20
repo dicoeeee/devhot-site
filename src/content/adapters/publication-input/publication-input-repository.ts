@@ -101,6 +101,7 @@ export const createPublicationInputRepository = (
         sourceUrl: insight.sourceUrl,
         officialUrl: insight.officialUrl,
         domain: insight.domain,
+        ...(insight.domains ? { domains: [...insight.domains] } : {}),
         title: insight.title,
         contentDate: { ...insight.contentDate },
         summary: insight.summary,

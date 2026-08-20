@@ -69,4 +69,30 @@ describe("SiteContentRepository", () => {
       intro: { summary: "这是一份受控的最小发布输入。" },
     });
   });
+
+  it("preserves one shared insight identity across both domain homes", async () => {
+    const fixture = await writePublicationFixture({
+      insightDomainMembership: "shared",
+    });
+    const repository = await createSiteContentRepository(fixture.root);
+
+    const homes = await repository.listHomes();
+    const insights = await repository.listInsights();
+    if (homes.some((home) => home.layout !== "editorial")) {
+      throw new Error("expected editorial home pages");
+    }
+
+    expect(
+      homes.map((home) =>
+        home.layout === "editorial" ? home.recentInsights[0]?.id : undefined,
+      ),
+    ).toEqual([fixture.insightId, fixture.insightId]);
+    expect(insights.filter((insight) => insight.id === fixture.insightId)).toHaveLength(
+      1,
+    );
+    expect(insights.find((insight) => insight.id === fixture.insightId)).toMatchObject({
+      domain: "software-engineering",
+      domains: ["software-engineering", "model-research"],
+    });
+  });
 });

@@ -13,6 +13,8 @@ interface PublicationFixtureOptions {
   readonly duplicateEditorialDomain?: "model-research" | "software-engineering";
   readonly extraSourceReferencingInsight?: boolean;
   readonly invalidEditorialDomain?: boolean;
+  readonly insightDomainMembership?:
+    "duplicate" | "empty" | "missing-primary" | "overflow" | "shared" | "unknown";
   readonly invalidWeeklyRange?: boolean;
   readonly legacyHomeContract?: boolean;
   readonly missingWeeklyOverview?: boolean;
@@ -38,6 +40,20 @@ export const writePublicationFixture = async (
   const sourceId = "source-59498e27cf7aac1a9e4f9a76";
   const modelInsightId = "insight-000000000000000000000002";
   const modelSourceId = "source-000000000000000000000002";
+  const insightDomains =
+    options.insightDomainMembership === "empty"
+      ? []
+      : options.insightDomainMembership === "overflow"
+        ? ["software-engineering", "model-research", "operations"]
+        : options.insightDomainMembership === "shared"
+          ? ["software-engineering", "model-research"]
+          : options.insightDomainMembership === "missing-primary"
+            ? ["model-research"]
+            : options.insightDomainMembership === "unknown"
+              ? ["software-engineering", "operations"]
+              : options.insightDomainMembership === "duplicate"
+                ? ["software-engineering", "software-engineering"]
+                : undefined;
   const masthead = {
     publication: "DEVHOT",
     journal: "INSIGHT JOURNAL",
@@ -154,9 +170,11 @@ export const writePublicationFixture = async (
               recentInsights: [
                 {
                   insightId:
-                    options.duplicateEditorialDomain === "software-engineering"
+                    options.insightDomainMembership === "shared"
                       ? insightId
-                      : modelInsightId,
+                      : options.duplicateEditorialDomain === "software-engineering"
+                        ? insightId
+                        : modelInsightId,
                   status: "updated",
                 },
               ],
@@ -169,6 +187,7 @@ export const writePublicationFixture = async (
     id: insightId,
     sourceId,
     domain: "software-engineering",
+    ...(insightDomains !== undefined ? { domains: insightDomains } : {}),
     title: "Reliable agent architecture 1",
     contentDate: { value: "2026-08-11T08:00:00+00:00", basis: "published_at" },
     summary: "不可变输入让自动化结果可重放。",

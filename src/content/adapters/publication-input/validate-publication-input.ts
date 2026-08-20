@@ -247,6 +247,13 @@ export const validatePublicationInput = async (
     sources.map((source) => source.id),
     "source identity",
   );
+  for (const insight of insights) {
+    if (insight.domains && !insight.domains.some((domain) => domain === insight.domain)) {
+      throw new Error(
+        `insight domains must include primary domain: ${insight.id}/${insight.domain}`,
+      );
+    }
+  }
 
   const sourcesById = new Map(sources.map((source) => [source.id, source]));
   const insightsById = new Map(insights.map((insight) => [insight.id, insight]));
@@ -300,7 +307,8 @@ export const validatePublicationInput = async (
       );
       for (const recent of domainHome.recentInsights) {
         const insight = insightsById.get(recent.insightId);
-        if (!insight || insight.domain !== domainHome.domain.id) {
+        const insightDomains = insight?.domains ?? (insight ? [insight.domain] : []);
+        if (!insight || !insightDomains.includes(domainHome.domain.id)) {
           throw new Error(
             `recent insight/domain mismatch: ${domainHome.domain.id}/${recent.insightId}`,
           );

@@ -1,3 +1,5 @@
+export type InsightDomainId = "software-engineering" | "model-research";
+
 export interface InsightPage {
   readonly id: string;
   readonly url: string;
@@ -5,6 +7,7 @@ export interface InsightPage {
   readonly sourceUrl: string;
   readonly officialUrl: string;
   readonly domain: string;
+  readonly domains?: readonly InsightDomainId[];
   readonly title: string;
   readonly contentDate: {
     readonly value: string;
