@@ -21,7 +21,7 @@ const sha256 = (value: Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
 
 const routeToFile = (distRoot: string, route: string): string => {
-  if (!/^\/[a-z0-9-]+\/$/.test(route)) {
+  if (!/^\/(?:[a-z0-9-]+\/)+$/.test(route)) {
     throw new Error(`invalid static route: ${route}`);
   }
   return join(distRoot, route.slice(1), "index.html");
@@ -65,8 +65,12 @@ export const verifyDistribution = async ({
   const metadata = parseMetadata(
     JSON.parse(await readFile(join(distRoot, "_publication.json"), "utf8")) as unknown,
   );
-  if (metadata.routes.length !== 1) {
-    throw new Error("the minimum slice must publish exactly one reader route");
+  if (
+    metadata.routes.length < 3 ||
+    !metadata.routes.some((route) => route.startsWith("/insights/")) ||
+    !metadata.routes.some((route) => route.startsWith("/sources/"))
+  ) {
+    throw new Error("the publication slice requires home, insight, and source routes");
   }
   if (new Set(metadata.routes).size !== metadata.routes.length) {
     throw new Error("publication metadata contains duplicate routes");
@@ -84,7 +88,11 @@ export const verifyDistribution = async ({
     /\.(?:css|html|js)$/.test(candidate),
   )) {
     const source = await readFile(join(distRoot, path), "utf8");
-    if (/(?:https?:)?\/\/[a-z0-9]/i.test(source)) {
+    if (
+      /\b(?:src|srcset)=["'](?:https?:)?\/\//i.test(source) ||
+      /\b(?:url|import)\s*\(\s*["']?(?:https?:)?\/\//i.test(source) ||
+      /\b(?:fetch|import)\s*\(\s*["'](?:https?:)?\/\//i.test(source)
+    ) {
       throw new Error(`external runtime dependency found in ${path}`);
     }
   }
@@ -102,10 +110,14 @@ export const verifyDistribution = async ({
         throw new Error(`broken internal link ${href} in ${route}`);
       }
     }
-    for (const asset of metadata.assets) {
-      if (!html.includes(asset.url)) {
-        throw new Error(`page ${route} does not reference ${asset.url}`);
-      }
+  }
+
+  const allHtml = await Promise.all(
+    metadata.routes.map((route) => readFile(routeToFile(distRoot, route), "utf8")),
+  );
+  for (const asset of metadata.assets) {
+    if (!allHtml.some((html) => html.includes(asset.url))) {
+      throw new Error(`no public page references ${asset.url}`);
     }
   }
 

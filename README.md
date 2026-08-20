@@ -1,8 +1,8 @@
 # devhot-site
 
 `devhot-site`
-是 DEVHOT 的公开静态网站构建仓库。当前最小切片从一份受控、版本化的 fixture 出发，经输入验证、只读内容端口和唯一 composition
-root，生成一个 Astro 静态阅读页。
+是 DEVHOT 的公开静态网站构建仓库。当前切片从一份受控、版本化的 fixture 出发，经输入验证、只读内容端口和唯一 composition
+root，生成首页、当前洞察详情与独立来源归档。
 
 ## 当前边界
 
@@ -11,8 +11,8 @@ root，生成一个 Astro 静态阅读页。
 - 页面只通过 `SiteContentRepository` 获取稳定对象，不直接读取
   `site-input/`、Manifest或文件系统。
 - `site-input/manifest.json` 完整枚举结构数据和内容寻址资源；未声明文件会使构建失败。
-- 当前 fixture 只生成
-  `/software-engineering/`，用于证明最小发布链路，不代表七类正式读者页面已经全部实施。
+- 当前 fixture 生成 `/software-engineering/`、一条 `/insights/<id>/` 和对应
+  `/sources/<id>/`；两类内容页使用双向稳定链接，仍不代表七类正式读者页面已经全部实施。
 - 仓库不包含 Devhot SQLite、日志、凭据、私有运行状态或未经确认的内容。
 
 ## 唯一门禁
@@ -33,7 +33,7 @@ npm run gate
 ## 输入与内容边界
 
 ```text
-site-input/manifest.json
+site-input/manifest.json (v2, baseline SHA + input identity)
         ↓ schema / 文件集合 / 模式 / SHA-256 / 引用验证
 VerifiedPublicationInput
         ↓ PublicationInputRepository
@@ -43,7 +43,9 @@ Astro pages → dist/ → output verifier
 ```
 
 `contracts/` 保存语言无关的 JSON Schema；`src/content/model/` 与 `src/content/ports/`
-不依赖物理输入布局；`src/content/adapters/publication-input/` 是当前唯一静态适配器。
+不依赖物理输入布局；`src/content/adapters/publication-input/`
+是当前唯一静态适配器。Manifest 只允许引用已声明并校验 SHA-256 的文件；未知文件、悬空引用和没有任何公开对象引用的资源都会使门禁失败。来源缺少可靠发布时间时保留
+`first_collected_at`，页面显示“抓取于”，不会改写为发布时间。
 
 ## 固定构建运行时
 
@@ -57,11 +59,10 @@ Astro pages → dist/ → output verifier
 `Dockerfile` 同时固定可读 tag 和 digest，并在镜像构建中执行 `npm ci` 与
 `npm run gate`。GitHub Actions 使用同一精确 Node 版本和唯一门禁。
 
-Node 24.19.0 自带的 npm 11.17.0 当前会拒绝部分上游包声明但尚未发布的 optional
-dependency。`package-lock.json` 为 Rolldown
-1.2.5 的两个缺失 binding 保留惰性占位，与 npm/cli
-[#9846](https://github.com/npm/cli/issues/9846)
-记录的兼容形式一致；上游修复并升级依赖后应删除这些占位。
+Rolldown 1.2.5 先前缺失的 `darwin-x64` 与 `linux-arm64-gnu` optional
+binding 已发布，`package-lock.json` 固定其完整版本、下载地址和完整性哈希。不得恢复只有
+`optional: true` 而没有版本的惰性占位；npm
+11.17.0 会在干净安装的依赖去重阶段把空版本交给 SemVer，并以 `Invalid Version` 失败。
 
 ## 品牌资产
 

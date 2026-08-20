@@ -1,0 +1,41 @@
+---
+import { createSiteContentRepository } from "../../content/composition-root";
+import type { SourceArchivePage } from "../../content/model/source-archive-page";
+import SiteLayout from "../../layouts/SiteLayout.astro";
+
+export async function getStaticPaths() {
+  const repository = await createSiteContentRepository();
+  const sources = await repository.listSourceArchives();
+  return sources.map((source) => ({ params: { id: source.id }, props: { source } }));
+}
+
+interface Props {
+  source: SourceArchivePage;
+}
+
+const { source } = Astro.props;
+const dateLabel = source.contentDate.basis === "published_at" ? "发布于" : "抓取于";
+---
+
+<SiteLayout title={`${source.title} · 来源归档`} canonicalPath={source.url}>
+  <main class="reading-page source-page">
+    <p class="section-label">来源归档 · {source.source.name}</p>
+    <h1>{source.title}</h1>
+    <p>
+      <span>{dateLabel}</span>
+      <time datetime={source.contentDate.value}>{source.contentDate.value}</time>
+    </p>
+    <article class="archived-body">
+      {source.body.parts.map((part) => <p>{part}</p>)}
+    </article>
+    {source.images.map((image) => <img src={image.url} alt={image.alt} loading="lazy" />)}
+    <section>
+      <h2>来源与完整性</h2>
+      <p>归档正文来自首次成功存档；时间依据按上方标签明确区分。</p>
+    </section>
+    <nav aria-label="来源导航">
+      <a href={source.insightUrl}>查看当前洞察</a>
+      <a href={source.officialUrl}>访问官方原文</a>
+    </nav>
+  </main>
+</SiteLayout>

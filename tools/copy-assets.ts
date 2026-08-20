@@ -5,6 +5,11 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { validatePublicationInput } from "../src/content/adapters/publication-input/validate-publication-input";
+import {
+  insightRoute,
+  mediaAssetRoute,
+  sourceArchiveRoute,
+} from "../src/content/model/site-routes";
 
 const execFileAsync = promisify(execFile);
 
@@ -48,9 +53,13 @@ export const copyDeclaredAssets = async ({
     schemaVersion: 1,
     publicationId: input.publicationId,
     buildSha: await resolveBuildSha(),
-    routes: [input.home.domain.url],
+    routes: [
+      input.home.domain.url,
+      ...input.insights.map((insight) => insightRoute(insight.id)),
+      ...input.sources.map((source) => sourceArchiveRoute(source.id)),
+    ].sort(),
     assets: assets.map((asset) => ({
-      url: `/media/sha256/${asset.sha256}.png`,
+      url: mediaAssetRoute(asset.sha256),
       sha256: asset.sha256,
     })),
   };

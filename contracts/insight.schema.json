@@ -1,0 +1,109 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://devhot.example/contracts/insight.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "id",
+    "sourceId",
+    "domain",
+    "title",
+    "contentDate",
+    "summary",
+    "mechanism",
+    "keyInterpretation",
+    "domainImplications",
+    "tags",
+    "citations",
+    "sourceUrl",
+    "officialUrl"
+  ],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "id": { "type": "string", "pattern": "^insight-[a-f0-9]{24}$" },
+    "sourceId": { "type": "string", "pattern": "^source-[a-f0-9]{24}$" },
+    "domain": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+    "title": { "type": "string", "minLength": 1 },
+    "contentDate": { "$ref": "#/$defs/contentDate" },
+    "summary": { "type": "string", "minLength": 1 },
+    "mechanism": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "blocks"],
+      "properties": {
+        "status": { "enum": ["present", "no_supported_content"] },
+        "blocks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "text", "evidenceRefs"],
+            "properties": {
+              "kind": {
+                "enum": ["text", "source_image", "technical_flow_mermaid"]
+              },
+              "text": { "type": "string", "minLength": 1 },
+              "evidenceRefs": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/evidenceRef" }
+              }
+            }
+          }
+        }
+      }
+    },
+    "keyInterpretation": { "type": "string", "minLength": 1 },
+    "domainImplications": { "type": "string", "minLength": 1 },
+    "tags": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["type", "name"],
+        "properties": {
+          "type": { "type": "string", "minLength": 1 },
+          "name": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "citations": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["sourceId", "evidenceId", "quote"],
+        "properties": {
+          "sourceId": { "type": "string", "pattern": "^source-[a-f0-9]{24}$" },
+          "evidenceId": { "type": "string", "minLength": 1 },
+          "quote": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "sourceUrl": {
+      "type": "string",
+      "pattern": "^/sources/source-[a-f0-9]{24}/$"
+    },
+    "officialUrl": { "type": "string", "pattern": "^https://" }
+  },
+  "$defs": {
+    "contentDate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["value", "basis"],
+      "properties": {
+        "value": { "type": "string", "minLength": 1 },
+        "basis": { "enum": ["published_at", "first_collected_at"] }
+      }
+    },
+    "evidenceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["evidenceId", "quote"],
+      "properties": {
+        "evidenceId": { "type": "string", "minLength": 1 },
+        "quote": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

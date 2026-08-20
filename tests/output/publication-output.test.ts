@@ -7,13 +7,23 @@ import { beforeAll, describe, expect, it } from "vitest";
 
 import { copyDeclaredAssets } from "../../tools/copy-assets";
 import { verifyDistribution } from "../../tools/verify-dist";
+import { validatePublicationInput } from "../../src/content/adapters/publication-input/validate-publication-input";
 
 const execFileAsync = promisify(execFile);
 const projectRoot = process.cwd();
 const distRoot = join(projectRoot, "dist");
+let expectedPublicationId = "";
+let expectedRoutes: string[] = [];
 
 describe("publication output", () => {
   beforeAll(async () => {
+    const input = await validatePublicationInput(join(projectRoot, "site-input"));
+    expectedPublicationId = input.publicationId;
+    expectedRoutes = [
+      input.home.domain.url,
+      ...input.insights.map((insight) => `/insights/${insight.id}/`),
+      ...input.sources.map((source) => `/sources/${source.id}/`),
+    ].sort();
     await rm(distRoot, { recursive: true, force: true });
     await execFileAsync(
       process.execPath,
@@ -48,8 +58,8 @@ describe("publication output", () => {
     expect(outputLogo.equals(inputLogo)).toBe(true);
     await expect(verifyDistribution({ distRoot })).resolves.toEqual(
       expect.objectContaining({
-        publicationId: "fixture-2026-08-19",
-        routes: ["/software-engineering/"],
+        publicationId: expectedPublicationId,
+        routes: expectedRoutes,
       }),
     );
   });
