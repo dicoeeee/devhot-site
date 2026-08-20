@@ -18,6 +18,12 @@ import {
 
 const projectRoot = process.cwd();
 const workflowPath = join(projectRoot, ".github", "workflows", "publication-gate.yml");
+const repositoryWorkflowPath = join(
+  projectRoot,
+  ".github",
+  "workflows",
+  "repository-gate.yml",
+);
 type CandidateMutation = Parameters<typeof createPublicationGateFixture>[0];
 
 describe("publication-gate workflow", () => {
@@ -74,6 +80,17 @@ describe("publication-gate workflow", () => {
     for (const action of externalActions) {
       expect(action[2], action[1]).toMatch(/^[a-f0-9]{40}$/);
     }
+  });
+
+  it("provides Git before repository fixture tests run", async () => {
+    const workflow = await readFile(repositoryWorkflowPath, "utf8");
+    const gitInstallIndex = workflow.indexOf("run: apk add --no-cache git");
+    const dependencyInstallIndex = workflow.indexOf("run: npm ci");
+    const repositoryGateIndex = workflow.indexOf("run: npm run gate");
+
+    expect(gitInstallIndex).toBeGreaterThan(0);
+    expect(dependencyInstallIndex).toBeGreaterThan(gitInstallIndex);
+    expect(repositoryGateIndex).toBeGreaterThan(dependencyInstallIndex);
   });
 
   it("accepts a single-parent candidate that changes only regular site input", async () => {
