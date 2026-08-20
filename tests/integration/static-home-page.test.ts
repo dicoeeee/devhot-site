@@ -1,49 +1,40 @@
 import { execFile } from "node:child_process";
-import { cp, mkdtemp, readFile, rm, symlink } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
-import { beforeEach, describe, expect, it } from "vitest";
+import { describe, expect, it } from "vitest";
 
 import { writePublicationFixture } from "../support/publication-fixture";
+import { prepareStaticBuild } from "../support/static-build";
 
 const execFileAsync = promisify(execFile);
 const projectRoot = process.cwd();
 const astroCli = join(projectRoot, "node_modules", "astro", "bin", "astro.mjs");
 
-const prepareStaticBuild = async (inputRoot: string): Promise<string> => {
-  const root = await mkdtemp(join(tmpdir(), "devhot-site-page-"));
-  await Promise.all(
-    ["contracts", "public", "src"].map((path) =>
-      cp(join(projectRoot, path), join(root, path), { recursive: true }),
-    ),
-  );
-  await Promise.all(
-    ["astro.config.mjs", "package.json", "tsconfig.json"].map((path) =>
-      cp(join(projectRoot, path), join(root, path)),
-    ),
-  );
-  await symlink(join(projectRoot, "node_modules"), join(root, "node_modules"), "dir");
-  await symlink(inputRoot, join(root, "site-input"), "dir");
-  return root;
-};
-
 describe("static editorial domain home", () => {
-  beforeEach(async () => {
+  it("builds the repository publication input without assuming its content", async () => {
     await rm(join(projectRoot, "dist"), { recursive: true, force: true });
-  });
-
-  it("builds a canonical default and one complete page per editorial domain", async () => {
     await execFileAsync(process.execPath, [astroCli, "build"], { cwd: projectRoot });
 
     const root = await readFile(join(projectRoot, "dist", "index.html"), "utf8");
+
+    expect(root).toMatch(/<meta http-equiv="refresh" content="0;url=\/[^\"]+\/">/);
+  });
+
+  it("renders the complete editorial behavior from a controlled fixture", async () => {
+    const fixture = await writePublicationFixture();
+    const buildRoot = await prepareStaticBuild(fixture.root);
+
+    await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
+
+    const root = await readFile(join(buildRoot, "dist", "index.html"), "utf8");
     const software = await readFile(
-      join(projectRoot, "dist", "software-engineering", "index.html"),
+      join(buildRoot, "dist", "software-engineering", "index.html"),
       "utf8",
     );
     const model = await readFile(
-      join(projectRoot, "dist", "model-research", "index.html"),
+      join(buildRoot, "dist", "model-research", "index.html"),
       "utf8",
     );
 
@@ -51,7 +42,7 @@ describe("static editorial domain home", () => {
     expect(software).toContain("<title>DEVHOT · 软件工程</title>");
     expect(software).toContain('data-domain-status="software-engineering"');
     expect(software).toContain('href="/model-research/"');
-    expect(software).toContain("上一个完整自然周的冻结软件工程概览。");
+    expect(software).toContain("冻结的软件工程周度概览。");
     expect(software.match(/data-recent-insight=/g)).toHaveLength(1);
     expect(software).toContain("01");
     expect(software).toContain('datetime="2026-08-11T08:00:00+00:00"');
@@ -75,7 +66,7 @@ describe("static editorial domain home", () => {
 
     expect(model).toContain('data-domain-status="model-research"');
     expect(model).toContain('href="/software-engineering/"');
-    expect(model).toContain("上一个完整自然周的冻结模型研发概览。");
+    expect(model).toContain("冻结的模型研发周度概览。");
     expect(model).toContain("已更新");
     expect(model).toContain("冻结输入让模型评估可复核。");
     expect(model).not.toContain("不可变输入让自动化结果可重放。");
@@ -106,14 +97,17 @@ describe("static editorial domain home", () => {
   });
 
   it("executes equivalent source-coverage controls and restores focus", async () => {
-    await execFileAsync(process.execPath, [astroCli, "build"], { cwd: projectRoot });
+    const fixture = await writePublicationFixture();
+    const buildRoot = await prepareStaticBuild(fixture.root);
+
+    await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
 
     const html = await readFile(
-      join(projectRoot, "dist", "software-engineering", "index.html"),
+      join(buildRoot, "dist", "software-engineering", "index.html"),
       "utf8",
     );
     const interaction = await readFile(
-      join(projectRoot, "dist", "scripts", "source-coverage.js"),
+      join(buildRoot, "dist", "scripts", "source-coverage.js"),
       "utf8",
     );
 

@@ -46,6 +46,45 @@ describe("validatePublicationInput", () => {
     });
   });
 
+  it("accepts one insight on both domain homes with one shared identity", async () => {
+    const fixture = await writePublicationFixture({
+      insightDomainMembership: "shared",
+    });
+
+    const verified = await validatePublicationInput(fixture.root);
+    if (verified.home.schemaVersion !== 2) throw new Error("expected editorial home");
+
+    expect(verified.insights[0]).toMatchObject({
+      id: fixture.insightId,
+      domain: "software-engineering",
+      domains: ["software-engineering", "model-research"],
+    });
+    expect(
+      verified.home.domains.map((home) => home.recentInsights[0]?.insightId),
+    ).toEqual([fixture.insightId, fixture.insightId]);
+  });
+
+  it("rejects insight domains that omit the legacy primary domain", async () => {
+    const fixture = await writePublicationFixture({
+      insightDomainMembership: "missing-primary",
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "insight domains must include primary domain",
+    );
+  });
+
+  it.each(["duplicate", "empty", "overflow", "unknown"] as const)(
+    "rejects invalid insight domain membership: %s",
+    async (insightDomainMembership) => {
+      const fixture = await writePublicationFixture({ insightDomainMembership });
+
+      await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+        "invalid insight input",
+      );
+    },
+  );
+
   it("rejects a recent selection that repeats an insight", async () => {
     const fixture = await writePublicationFixture({
       recentInsightSelection: "duplicate",

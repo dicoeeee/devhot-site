@@ -80,6 +80,7 @@ export interface InsightPublicationInput {
   readonly id: string;
   readonly sourceId: string;
   readonly domain: string;
+  readonly domains?: readonly EditorialDomainId[];
   readonly title: string;
   readonly contentDate: ContentDatePublicationInput;
   readonly summary: string;
