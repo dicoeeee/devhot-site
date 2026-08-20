@@ -30,6 +30,21 @@ npm run gate
 
 `npm run build` 复用同一输入与输出验证链，但不替代完整门禁。
 
+## 候选发布门禁
+
+`.github/workflows/publication-gate.yml` 只响应 `publication/**` 候选分支，稳定检查名为
+`publication-gate`。工作流只授予 `contents: read`，checkout 不保留凭据，也不包含更新
+`main`、App 私钥或局域网凭据。
+
+候选 checkout 后，工作流先运行内联可信边界检查，尚不安装依赖或执行候选脚本。该检查要求候选恰有一个父提交且父提交仍是远端
+`main`，使用 NUL 分隔的完整 diff 同时检查 rename/copy 的源和目标，只允许
+`site-input/**`，并拒绝非法路径、可执行文件、symlink 和 gitlink。通过后才设置精确 Node.js
+`24.19.0`、执行纯 `npm ci` 和唯一 `npm run gate`。
+
+普通构建器代码仍通过 `repository-gate` 与 Pull Request 进入 `main`； `publication-gate`
+只验证网站输入发布候选。本仓库测试可以重复验证工作流结构和本地 Git fixture，但真实 GitHub
+App 权限、Ruleset 叠加及同 SHA fast-forward 仍属于后续 GitHub 环境验收。
+
 ## 输入与内容边界
 
 ```text

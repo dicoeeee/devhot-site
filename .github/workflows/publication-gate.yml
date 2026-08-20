@@ -1,0 +1,140 @@
+name: publication-gate
+
+on:
+  push:
+    branches:
+      - "publication/**"
+
+permissions:
+  contents: read
+
+jobs:
+  publication-gate:
+    name: publication-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      ASTRO_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Check out the candidate without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify trusted publication boundary
+        shell: bash
+        run: |
+          # publication-boundary:start
+          set -euo pipefail
+
+          fail_boundary() {
+            echo "::error title=publication-boundary::$1"
+            exit 1
+          }
+
+          if [[ "${GITHUB_EVENT_NAME:-}" != "push" || "${GITHUB_REF:-}" != refs/heads/publication/* ]]; then
+            fail_boundary "invalid-trigger"
+          fi
+          candidate="${GITHUB_SHA:?GITHUB_SHA is required}"
+          if ! git cat-file -e "${candidate}^{commit}"; then
+            fail_boundary "candidate-commit-missing"
+          fi
+
+          git fetch --no-tags --force --depth=1 origin \
+            +refs/heads/main:refs/remotes/origin/publication-gate-main
+          trusted_main="$(git rev-parse refs/remotes/origin/publication-gate-main)"
+          read -r -a commit_line <<< "$(git rev-list --parents -n 1 "${candidate}")"
+          if [[ "${#commit_line[@]}" -ne 2 ]]; then
+            fail_boundary "invalid-parent-count:${#commit_line[@]}"
+          fi
+          candidate_parent="${commit_line[1]}"
+          if [[ "${candidate_parent}" != "${trusted_main}" ]]; then
+            fail_boundary "stale-base:expected=${trusted_main} actual=${candidate_parent}"
+          fi
+
+          validate_publication_path() {
+            local path="$1"
+            local rendered_path
+            printf -v rendered_path '%q' "${path}"
+            if [[ "${path}" != site-input/* ]]; then
+              fail_boundary "unauthorized-path:${rendered_path}"
+            fi
+            if [[ ! "${path}" =~ ^site-input/[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$ ]] || \
+              [[ "/${path}/" == *"/./"* || "/${path}/" == *"/../"* ]]; then
+              fail_boundary "illegal-path:${rendered_path}"
+            fi
+          }
+
+          changed_path_count=0
+          while IFS= read -r -d '' status; do
+            case "${status}" in
+              R*|C*)
+                IFS= read -r -d '' source_path
+                IFS= read -r -d '' target_path
+                validate_publication_path "${source_path}"
+                validate_publication_path "${target_path}"
+                ;;
+              A|M|D|T)
+                IFS= read -r -d '' changed_path
+                validate_publication_path "${changed_path}"
+                ;;
+              *)
+                fail_boundary "unsupported-diff-status:${status}"
+                ;;
+            esac
+            changed_path_count=$((changed_path_count + 1))
+          done < <(
+            git diff-tree --no-commit-id --name-status -r -z \
+              --find-renames --find-copies-harder \
+              "${candidate_parent}" "${candidate}"
+          )
+          if [[ "${changed_path_count}" -eq 0 ]]; then
+            fail_boundary "empty-candidate"
+          fi
+
+          tree_entry_count=0
+          while IFS= read -r -d '' tree_entry; do
+            tree_metadata="${tree_entry%%$'\t'*}"
+            tree_path="${tree_entry#*$'\t'}"
+            read -r tree_mode tree_type tree_object <<< "${tree_metadata}"
+            validate_publication_path "${tree_path}"
+            if [[ "${tree_mode}" != "100644" || "${tree_type}" != "blob" ]]; then
+              printf -v rendered_tree_path '%q' "${tree_path}"
+              fail_boundary "unsafe-entry:${tree_mode} ${tree_type} ${rendered_tree_path}"
+            fi
+            tree_entry_count=$((tree_entry_count + 1))
+          done < <(git ls-tree -r -z "${candidate}" -- site-input)
+          if [[ "${tree_entry_count}" -eq 0 ]]; then
+            fail_boundary "empty-publication-input"
+          fi
+
+          echo "publication-boundary-ok:${candidate}"
+          # publication-boundary:end
+
+      - name: Set up the fixed Node runtime
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903 # v6.0.0
+        with:
+          node-version: "24.19.0"
+          cache: npm
+
+      - name: Verify runtime version
+        shell: bash
+        run: |
+          actual_version="$(node --version)"
+          if [[ "${actual_version}" != "v24.19.0" ]]; then
+            echo "::error title=runtime-version::node-version-mismatch:expected=v24.19.0 actual=${actual_version}"
+            exit 1
+          fi
+
+      - name: Install locked dependencies
+        run: npm ci
+
+      - name: Run the single repository gate
+        shell: bash
+        run: |
+          if ! npm run gate; then
+            echo "::error title=repository-gate::repository-gate-failed"
+            exit 1
+          fi

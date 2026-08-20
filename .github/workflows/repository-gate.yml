@@ -24,6 +24,9 @@ jobs:
       - name: Verify runtime version
         run: test "$(node --version)" = "v24.19.0"
 
+      - name: Install Bash and Git for repository fixtures
+        run: apk add --no-cache bash git
+
       - name: Install locked dependencies
         run: npm ci
 
