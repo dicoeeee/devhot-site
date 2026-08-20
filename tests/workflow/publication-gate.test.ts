@@ -27,6 +27,7 @@ describe("publication-gate workflow", () => {
     mutateCandidate: CandidateMutation,
   ): Promise<PublicationGateFixture> => {
     const fixture = await createPublicationGateFixture(mutateCandidate);
+    fixtures.push(fixture);
     return fixture;
   };
 
