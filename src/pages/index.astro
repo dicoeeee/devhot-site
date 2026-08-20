@@ -1,0 +1,7 @@
+---
+import { createSiteContentRepository } from "../content/composition-root";
+
+const defaultHome = await (await createSiteContentRepository()).getHome();
+Astro.response.headers.set("Location", defaultHome.domain.url);
+return Astro.redirect(defaultHome.domain.url, 308);
+---

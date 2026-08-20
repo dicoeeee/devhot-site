@@ -1,22 +1,9 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://devhot.example/contracts/home-page.schema.json",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["schemaVersion", "domain", "masthead", "status", "intro"],
-  "properties": {
-    "schemaVersion": { "const": 1 },
-    "domain": {
-      "type": "object",
-      "additionalProperties": false,
-      "required": ["id", "name", "url"],
-      "properties": {
-        "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
-        "name": { "type": "string", "minLength": 1 },
-        "url": { "type": "string", "pattern": "^/[a-z0-9-]+/$" }
-      }
-    },
-    "masthead": {
+  "oneOf": [{ "$ref": "#/$defs/legacyHome" }, { "$ref": "#/$defs/editorialHome" }],
+  "$defs": {
+    "brand": {
       "type": "object",
       "additionalProperties": false,
       "required": ["publication", "journal", "attribution", "logoAssetPath"],
@@ -28,6 +15,40 @@
           "type": "string",
           "pattern": "^assets/sha256/[a-f0-9]{64}\\.png$"
         }
+      }
+    },
+    "domain": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name", "url"],
+          "properties": {
+            "id": { "const": "software-engineering" },
+            "name": { "const": "软件工程" },
+            "url": { "const": "/software-engineering/" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "name", "url"],
+          "properties": {
+            "id": { "const": "model-research" },
+            "name": { "const": "模型研发" },
+            "url": { "const": "/model-research/" }
+          }
+        }
+      ]
+    },
+    "legacyDomain": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "url"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
+        "name": { "type": "string", "minLength": 1 },
+        "url": { "type": "string", "pattern": "^/[a-z0-9-]+/$" }
       }
     },
     "status": {
@@ -42,14 +63,102 @@
         }
       }
     },
-    "intro": {
+    "legacyHome": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kicker", "headline", "summary"],
+      "required": ["schemaVersion", "domain", "masthead", "status", "intro"],
       "properties": {
-        "kicker": { "type": "string", "minLength": 1 },
-        "headline": { "type": "string", "minLength": 1 },
-        "summary": { "type": "string", "minLength": 1 }
+        "schemaVersion": { "const": 1 },
+        "domain": { "$ref": "#/$defs/legacyDomain" },
+        "masthead": { "$ref": "#/$defs/brand" },
+        "status": { "$ref": "#/$defs/status" },
+        "intro": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kicker", "headline", "summary"],
+          "properties": {
+            "kicker": { "type": "string", "minLength": 1 },
+            "headline": { "type": "string", "minLength": 1 },
+            "summary": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "editorialHome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "defaultDomain", "masthead", "domains"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "defaultDomain": { "const": "software-engineering" },
+        "masthead": { "$ref": "#/$defs/brand" },
+        "domains": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["domain", "status", "weeklyFocus", "recentInsights"],
+            "properties": {
+              "domain": { "$ref": "#/$defs/domain" },
+              "status": { "$ref": "#/$defs/status" },
+              "weeklyFocus": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "weekStart",
+                  "weekEnd",
+                  "overview",
+                  "selectedCount",
+                  "sources"
+                ],
+                "properties": {
+                  "weekStart": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                  },
+                  "weekEnd": {
+                    "type": "string",
+                    "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+                  },
+                  "overview": { "type": "string", "minLength": 1 },
+                  "selectedCount": { "type": "integer", "minimum": 1 },
+                  "sources": {
+                    "type": "array",
+                    "minItems": 1,
+                    "items": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["name", "count"],
+                      "properties": {
+                        "name": { "type": "string", "minLength": 1 },
+                        "count": { "type": "integer", "minimum": 1 }
+                      }
+                    }
+                  }
+                }
+              },
+              "recentInsights": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 5,
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": ["insightId", "status"],
+                  "properties": {
+                    "insightId": {
+                      "type": "string",
+                      "pattern": "^insight-[a-f0-9]{24}$"
+                    },
+                    "status": { "enum": ["new", "updated"] }
+                  }
+                }
+              }
+            }
+          }
+        }
       }
     }
   }

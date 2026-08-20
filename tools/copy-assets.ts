@@ -54,7 +54,10 @@ export const copyDeclaredAssets = async ({
     publicationId: input.publicationId,
     buildSha: await resolveBuildSha(),
     routes: [
-      input.home.domain.url,
+      "/",
+      ...(input.home.schemaVersion === 1
+        ? [input.home.domain.url]
+        : input.home.domains.map((home) => home.domain.url)),
       ...input.insights.map((insight) => insightRoute(insight.id)),
       ...input.sources.map((source) => sourceArchiveRoute(source.id)),
     ].sort(),

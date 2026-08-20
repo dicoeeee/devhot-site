@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
-  "publicationId": "candidate-5e27f61531d19b9a6ff54044",
+  "publicationId": "candidate-64acec1408a2113a73a8a650",
   "candidate": {
     "baselineSha": "0000000000000000000000000000000000000000",
-    "inputIdentity": "5e27f61531d19b9a6ff540444c6a5b86a9bcc8964015838f44640e8569dcd6bb"
+    "inputIdentity": "64acec1408a2113a73a8a65012e2ca45eb48846766845450bb1e2c4d2c3447ac"
   },
   "builderCompatibility": {
     "min": "0.2.0",
@@ -11,14 +11,20 @@
   },
   "entrypoints": {
     "home": "data/home.json",
-    "insights": ["data/insights/insight-59498e27cf7aac1a9e4f9a76.json"],
-    "sources": ["data/sources/source-59498e27cf7aac1a9e4f9a76.json"]
+    "insights": [
+      "data/insights/insight-59498e27cf7aac1a9e4f9a76.json",
+      "data/insights/insight-000000000000000000000002.json"
+    ],
+    "sources": [
+      "data/sources/source-59498e27cf7aac1a9e4f9a76.json",
+      "data/sources/source-000000000000000000000002.json"
+    ]
   },
   "files": [
     {
       "path": "data/home.json",
       "mediaType": "application/json",
-      "sha256": "ac984a8b24f85bc50a5b0a77c4d249c03a890454f307c9b4f0f723dc1caaa27e"
+      "sha256": "f313c2fc977aff050923d8b0cfe133e08ed17a27791eb759916aeabb18cb9122"
     },
     {
       "path": "data/insights/insight-59498e27cf7aac1a9e4f9a76.json",
@@ -29,6 +35,16 @@
       "path": "data/sources/source-59498e27cf7aac1a9e4f9a76.json",
       "mediaType": "application/json",
       "sha256": "b19662d73564cc191a6cdbb8713d3b3d450dee41018cdd6df0f9d9e630e84aab"
+    },
+    {
+      "path": "data/insights/insight-000000000000000000000002.json",
+      "mediaType": "application/json",
+      "sha256": "622876d19602b5d5c7ad85788fd878d0f2e955e02431da84f95ba18019fc9b33"
+    },
+    {
+      "path": "data/sources/source-000000000000000000000002.json",
+      "mediaType": "application/json",
+      "sha256": "dbf8300eeef57f3779762eb16499950cd77a06f802757ace904bb3ccaa7653c2"
     },
     {
       "path": "assets/sha256/73bc08f1a558271ed021a4f51fcc4a07d2850deea7cb592282ae0f9d5a110c89.png",

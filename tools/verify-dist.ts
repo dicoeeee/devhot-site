@@ -21,6 +21,7 @@ const sha256 = (value: Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
 
 const routeToFile = (distRoot: string, route: string): string => {
+  if (route === "/") return join(distRoot, "index.html");
   if (!/^\/(?:[a-z0-9-]+\/)+$/.test(route)) {
     throw new Error(`invalid static route: ${route}`);
   }
@@ -98,6 +99,7 @@ export const verifyDistribution = async ({
   }
 
   const routeSet = new Set(metadata.routes);
+  const outputFileSet = new Set(outputFiles);
   for (const route of metadata.routes) {
     const htmlPath = routeToFile(distRoot, route);
     const html = await readFile(htmlPath, "utf8");
@@ -106,7 +108,12 @@ export const verifyDistribution = async ({
     );
     for (const href of internalLinks) {
       if (href.startsWith("/media/")) continue;
-      if (!routeSet.has(href)) {
+      const hrefUrl = new URL(href, "https://devhot.invalid");
+      const hrefPath = hrefUrl.pathname;
+      if (outputFileSet.has(hrefPath.slice(1))) continue;
+      const pageRoute =
+        hrefPath === "/" || hrefPath.endsWith("/") ? hrefPath : `${hrefPath}/`;
+      if (!routeSet.has(pageRoute)) {
         throw new Error(`broken internal link ${href} in ${route}`);
       }
     }

@@ -1,4 +1,4 @@
-export interface HomePublicationInput {
+export interface LegacyHomePublicationInput {
   readonly schemaVersion: 1;
   readonly domain: {
     readonly id: string;
@@ -21,6 +21,47 @@ export interface HomePublicationInput {
     readonly summary: string;
   };
 }
+
+export type EditorialDomainId = "software-engineering" | "model-research";
+
+export interface EditorialHomePublicationInput {
+  readonly schemaVersion: 2;
+  readonly defaultDomain: "software-engineering";
+  readonly masthead: {
+    readonly publication: "DEVHOT";
+    readonly journal: "INSIGHT JOURNAL";
+    readonly attribution: "公司持续集成管理委员会(CIMC)";
+    readonly logoAssetPath: string;
+  };
+  readonly domains: readonly {
+    readonly domain: {
+      readonly id: EditorialDomainId;
+      readonly name: "软件工程" | "模型研发";
+      readonly url: "/software-engineering/" | "/model-research/";
+    };
+    readonly status: {
+      readonly label: string;
+      readonly updatedAt: string;
+    };
+    readonly weeklyFocus: {
+      readonly weekStart: string;
+      readonly weekEnd: string;
+      readonly overview: string;
+      readonly selectedCount: number;
+      readonly sources: readonly {
+        readonly name: string;
+        readonly count: number;
+      }[];
+    };
+    readonly recentInsights: readonly {
+      readonly insightId: string;
+      readonly status: "new" | "updated";
+    }[];
+  }[];
+}
+
+export type HomePublicationInput =
+  LegacyHomePublicationInput | EditorialHomePublicationInput;
 
 export interface VerifiedAsset {
   readonly path: string;

@@ -1,0 +1,24 @@
+{
+  "schemaVersion": 1,
+  "id": "source-000000000000000000000002",
+  "insightId": "insight-000000000000000000000002",
+  "source": { "id": "model-fixture-source", "name": "Model Fixture Source" },
+  "title": "Reliable model architecture 2",
+  "officialUrl": "https://example.com/reliable-model-2",
+  "contentDate": {
+    "value": "2026-08-10T08:00:00+00:00",
+    "basis": "published_at"
+  },
+  "body": {
+    "format": "markdown",
+    "parts": ["Reliable evaluations use frozen inputs and explicit validation."]
+  },
+  "images": [
+    {
+      "assetPath": "assets/sha256/73bc08f1a558271ed021a4f51fcc4a07d2850deea7cb592282ae0f9d5a110c89.png",
+      "alt": "Evaluation architecture",
+      "position": 1
+    }
+  ],
+  "insightUrl": "/insights/insight-000000000000000000000002/"
+}
