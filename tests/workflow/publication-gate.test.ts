@@ -82,14 +82,16 @@ describe("publication-gate workflow", () => {
     }
   });
 
-  it("provides Git before repository fixture tests run", async () => {
+  it("provides Bash and Git before repository fixture tests run", async () => {
     const workflow = await readFile(repositoryWorkflowPath, "utf8");
-    const gitInstallIndex = workflow.indexOf("run: apk add --no-cache git");
+    const fixtureRuntimeInstallIndex = workflow.indexOf(
+      "run: apk add --no-cache bash git",
+    );
     const dependencyInstallIndex = workflow.indexOf("run: npm ci");
     const repositoryGateIndex = workflow.indexOf("run: npm run gate");
 
-    expect(gitInstallIndex).toBeGreaterThan(0);
-    expect(dependencyInstallIndex).toBeGreaterThan(gitInstallIndex);
+    expect(fixtureRuntimeInstallIndex).toBeGreaterThan(0);
+    expect(dependencyInstallIndex).toBeGreaterThan(fixtureRuntimeInstallIndex);
     expect(repositoryGateIndex).toBeGreaterThan(dependencyInstallIndex);
   });
 
