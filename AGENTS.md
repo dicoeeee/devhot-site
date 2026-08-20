@@ -10,6 +10,9 @@
 - 只有 Issue 的 `Repositories` 明确列出 `dicoeeee/devhot-site`
   时，才允许修改本仓库。发现需要增加仓库或改变契约时，先更新 Issue 并取得用户确认，不得直接扩大范围。
 - 一个仓库由一个独立 Session、分支和 PR 交付。跨仓任务不得通过本地目录拼接伪装为单仓交付。
+- 跨仓 Issue 的开发与候选预检可以并行；所有仓库都必须先有独立 Draft
+  PR，再使用完整候选 SHA 运行 `dicoeeee/devhot` 中的
+  `cross-repository-preflight`。正式合入仍按消费者优先，本仓作为消费者先合入。
 
 ## 一票一分支、一仓一 PR
 
@@ -36,6 +39,11 @@ npm run gate
 - `repository-gate` 保护普通代码 PR；`publication-gate`
   只保护自动网站输入候选，两者不能互相替代。
 - 任一必需检查失败、取消、未运行或被跳过时，不得合并或把 Issue 报告为完成。
+- 跨仓 PR 必须填写机器可读的 `Cross-repository delivery`。Draft 可以保持
+  `blocked`/`pending`；离开 Draft 前必须为
+  `ready`、`Merge blockers: none`，并记录成功的候选预检 Actions run URL。缺 counterpart
+  PR、同名 Issue 分支、40 位 SHA 或仓库范围不一致时门禁失败；本仓作为消费者时不接受 producer
+  counterpart 提前指向 `main`。
 
 ## 公开与凭据边界
 
