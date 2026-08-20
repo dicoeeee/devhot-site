@@ -1,9 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
-import { spawnSync } from "node:child_process";
 
 const execFileAsync = promisify(execFile);
 const projectRoot = process.cwd();
@@ -15,7 +14,6 @@ export interface PublicationGateResult {
 }
 
 export interface PublicationGateFixture {
-  readonly root: string;
   readonly candidateSha: string;
   addGitlink(): Promise<void>;
   advanceProtectedMain(): Promise<void>;
@@ -95,7 +93,6 @@ export const createPublicationGateFixture = async (
   let candidateSha = await git(workingRoot, "rev-parse", "HEAD");
 
   return {
-    root: workingRoot,
     get candidateSha() {
       return candidateSha;
     },

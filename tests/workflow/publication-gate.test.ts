@@ -18,9 +18,17 @@ import {
 
 const projectRoot = process.cwd();
 const workflowPath = join(projectRoot, ".github", "workflows", "publication-gate.yml");
+type CandidateMutation = Parameters<typeof createPublicationGateFixture>[0];
 
 describe("publication-gate workflow", () => {
   const fixtures: PublicationGateFixture[] = [];
+
+  const createTrackedFixture = async (
+    mutateCandidate: CandidateMutation,
+  ): Promise<PublicationGateFixture> => {
+    const fixture = await createPublicationGateFixture(mutateCandidate);
+    return fixture;
+  };
 
   afterEach(async () => {
     await Promise.all(fixtures.splice(0).map((fixture) => fixture.cleanup()));
@@ -68,14 +76,13 @@ describe("publication-gate workflow", () => {
   });
 
   it("accepts a single-parent candidate that changes only regular site input", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await mkdir(join(root, "site-input", "data"), { recursive: true });
       await writeFile(
         join(root, "site-input", "data", "candidate.json"),
         '{"publication":"candidate"}\n',
       );
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -84,13 +91,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("rejects a candidate that changes builder code", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await writeFile(
         join(root, "src", "candidate.ts"),
         'throw new Error("candidate code must not run");\n',
       );
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -99,13 +105,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("reports a workflow rewrite as an unauthorized path", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await writeFile(
         join(root, ".github", "workflows", "publication-gate.yml"),
         "name: candidate-controlled-gate\n",
       );
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -116,10 +121,9 @@ describe("publication-gate workflow", () => {
   });
 
   it("reports lockfile drift before dependency installation", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await writeFile(join(root, "package-lock.json"), '{"candidate":true}\n');
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -128,12 +132,11 @@ describe("publication-gate workflow", () => {
   });
 
   it("rejects executable files inside the publication input", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       const executablePath = join(root, "site-input", "data", "candidate.sh");
       await writeFile(executablePath, "#!/bin/sh\nexit 0\n");
       await chmod(executablePath, 0o755);
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -144,13 +147,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("rejects publication paths outside the safe portable alphabet", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await writeFile(
         join(root, "site-input", "data", "candidate draft.json"),
         '{"publication":"candidate"}\n',
       );
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -161,13 +163,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("parses newline-bearing paths as one NUL-delimited record", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await writeFile(
         join(root, "site-input", "data", "candidate\nname.json"),
         '{"publication":"candidate"}\n',
       );
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -177,13 +178,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("checks a rename source as well as its publication target", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await rename(
         join(root, "src", "index.ts"),
         join(root, "site-input", "data", "index.ts"),
       );
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -192,13 +192,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("checks an unchanged copy source as well as its publication target", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await copyFile(
         join(root, "src", "index.ts"),
         join(root, "site-input", "data", "index.ts"),
       );
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -207,13 +206,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("rejects symlinks inside the publication input", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await symlink(
         "../../../src/index.ts",
         join(root, "site-input", "data", "candidate-link"),
       );
     });
-    fixtures.push(fixture);
 
     const result = await fixture.runBoundary();
 
@@ -224,13 +222,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("rejects a candidate whose protected-main parent has gone stale", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await writeFile(
         join(root, "site-input", "data", "candidate.json"),
         '{"publication":"candidate"}\n',
       );
     });
-    fixtures.push(fixture);
     await fixture.advanceProtectedMain();
 
     const result = await fixture.runBoundary();
@@ -240,13 +237,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("rejects gitlinks inside the publication input", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await writeFile(
         join(root, "site-input", "data", "candidate.json"),
         '{"publication":"candidate"}\n',
       );
     });
-    fixtures.push(fixture);
     await fixture.addGitlink();
 
     const result = await fixture.runBoundary();
@@ -258,13 +254,12 @@ describe("publication-gate workflow", () => {
   });
 
   it("rejects a candidate commit with more than one parent", async () => {
-    const fixture = await createPublicationGateFixture(async (root) => {
+    const fixture = await createTrackedFixture(async (root) => {
       await writeFile(
         join(root, "site-input", "data", "candidate.json"),
         '{"publication":"candidate"}\n',
       );
     });
-    fixtures.push(fixture);
     await fixture.makeMergeCandidate();
 
     const result = await fixture.runBoundary();
