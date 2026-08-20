@@ -10,9 +10,18 @@ import {
 
 interface PublicationFixtureOptions {
   readonly danglingLogoReference?: boolean;
+  readonly duplicateEditorialDomain?: "model-research" | "software-engineering";
   readonly extraSourceReferencingInsight?: boolean;
+  readonly invalidEditorialDomain?: boolean;
+  readonly invalidWeeklyRange?: boolean;
+  readonly legacyHomeContract?: boolean;
+  readonly missingWeeklyOverview?: boolean;
+  readonly recentInsightSelection?:
+    "complete" | "cross-domain" | "duplicate" | "empty" | "overflow";
+  readonly staleWeeklyRange?: boolean;
   readonly unreferencedAsset?: boolean;
   readonly unreferencedJson?: boolean;
+  readonly weeklySourceCounts?: "duplicate" | "mismatch";
 }
 
 const sha256 = (value: string): string =>
@@ -27,28 +36,134 @@ export const writePublicationFixture = async (
   const logoPath = `assets/sha256/${logoSha256}.png`;
   const insightId = "insight-59498e27cf7aac1a9e4f9a76";
   const sourceId = "source-59498e27cf7aac1a9e4f9a76";
-  const home = JSON.stringify({
-    schemaVersion: 1,
-    domain: {
-      id: "software-engineering",
-      name: "软件工程",
-      url: "/software-engineering/",
-    },
-    masthead: {
-      publication: "DEVHOT",
-      journal: "INSIGHT JOURNAL",
-      attribution: "公司持续集成管理委员会(CIMC)",
-      logoAssetPath: options.danglingLogoReference
-        ? `assets/sha256/${"0".repeat(64)}.png`
-        : logoPath,
-    },
-    status: { label: "已验证发布输入", updatedAt: "2026-08-19" },
-    intro: {
-      kicker: "软件工程 · CURRENT DOMAIN",
-      headline: "工程洞察，从证据到判断",
-      summary: "这是一份受控的最小发布输入。",
-    },
-  });
+  const modelInsightId = "insight-000000000000000000000002";
+  const modelSourceId = "source-000000000000000000000002";
+  const masthead = {
+    publication: "DEVHOT",
+    journal: "INSIGHT JOURNAL",
+    attribution: "公司持续集成管理委员会(CIMC)",
+    logoAssetPath: options.danglingLogoReference
+      ? `assets/sha256/${"0".repeat(64)}.png`
+      : logoPath,
+  };
+  const home = JSON.stringify(
+    options.legacyHomeContract
+      ? {
+          schemaVersion: 1,
+          domain: {
+            id: options.invalidEditorialDomain ? "operations" : "software-engineering",
+            name: options.invalidEditorialDomain ? "运维" : "软件工程",
+            url: options.invalidEditorialDomain
+              ? "/operations/"
+              : "/software-engineering/",
+          },
+          masthead,
+          status: { label: "已验证发布输入", updatedAt: "2026-08-19" },
+          intro: {
+            kicker: "软件工程 · CURRENT DOMAIN",
+            headline: "工程洞察，从证据到判断",
+            summary: "这是一份受控的最小发布输入。",
+          },
+        }
+      : {
+          schemaVersion: 2,
+          defaultDomain: "software-engineering",
+          masthead,
+          domains: [
+            {
+              domain: {
+                id:
+                  options.duplicateEditorialDomain === "model-research"
+                    ? "model-research"
+                    : "software-engineering",
+                name:
+                  options.duplicateEditorialDomain === "model-research"
+                    ? "模型研发"
+                    : "软件工程",
+                url:
+                  options.duplicateEditorialDomain === "model-research"
+                    ? "/model-research/"
+                    : "/software-engineering/",
+              },
+              status: { label: "已验证发布输入", updatedAt: "2026-08-19" },
+              weeklyFocus: {
+                weekStart: options.invalidWeeklyRange
+                  ? "2026-08-11"
+                  : options.staleWeeklyRange
+                    ? "2026-08-03"
+                    : "2026-08-10",
+                weekEnd: options.staleWeeklyRange ? "2026-08-09" : "2026-08-16",
+                ...(options.missingWeeklyOverview
+                  ? {}
+                  : { overview: "冻结的软件工程周度概览。" }),
+                selectedCount: options.weeklySourceCounts ? 2 : 1,
+                sources:
+                  options.weeklySourceCounts === "duplicate"
+                    ? [
+                        { name: "Fixture Source", count: 1 },
+                        { name: "Fixture Source", count: 1 },
+                      ]
+                    : [{ name: "Fixture Source", count: 1 }],
+              },
+              recentInsights:
+                options.recentInsightSelection === "empty"
+                  ? []
+                  : options.recentInsightSelection === "overflow"
+                    ? Array.from({ length: 6 }, () => ({ insightId, status: "new" }))
+                    : options.recentInsightSelection === "cross-domain"
+                      ? [{ insightId: modelInsightId, status: "new" }]
+                      : options.recentInsightSelection === "duplicate"
+                        ? [
+                            { insightId, status: "new" },
+                            { insightId, status: "updated" },
+                          ]
+                        : [
+                            {
+                              insightId:
+                                options.duplicateEditorialDomain === "model-research"
+                                  ? modelInsightId
+                                  : insightId,
+                              status: "new",
+                            },
+                          ],
+            },
+            {
+              domain: {
+                id: options.invalidEditorialDomain
+                  ? "operations"
+                  : options.duplicateEditorialDomain === "software-engineering"
+                    ? "software-engineering"
+                    : "model-research",
+                name:
+                  options.duplicateEditorialDomain === "software-engineering"
+                    ? "软件工程"
+                    : "模型研发",
+                url:
+                  options.duplicateEditorialDomain === "software-engineering"
+                    ? "/software-engineering/"
+                    : "/model-research/",
+              },
+              status: { label: "已验证发布输入", updatedAt: "2026-08-19" },
+              weeklyFocus: {
+                weekStart: options.staleWeeklyRange ? "2026-08-03" : "2026-08-10",
+                weekEnd: options.staleWeeklyRange ? "2026-08-09" : "2026-08-16",
+                overview: "冻结的模型研发周度概览。",
+                selectedCount: 1,
+                sources: [{ name: "Model Fixture Source", count: 1 }],
+              },
+              recentInsights: [
+                {
+                  insightId:
+                    options.duplicateEditorialDomain === "software-engineering"
+                      ? insightId
+                      : modelInsightId,
+                  status: "updated",
+                },
+              ],
+            },
+          ],
+        },
+  );
   const insight = JSON.stringify({
     schemaVersion: 1,
     id: insightId,
@@ -97,8 +212,36 @@ export const writePublicationFixture = async (
     images: [{ assetPath: logoPath, alt: "Architecture", position: 1 }],
     insightUrl: `/insights/${insightId}/`,
   });
+  const modelInsight = JSON.stringify({
+    ...JSON.parse(insight),
+    id: modelInsightId,
+    sourceId: modelSourceId,
+    domain: "model-research",
+    title: "Reliable model architecture 2",
+    summary: "冻结输入让模型评估可复核。",
+    sourceUrl: `/sources/${modelSourceId}/`,
+    officialUrl: "https://example.com/reliable-model-2",
+    citations: [
+      {
+        sourceId: modelSourceId,
+        evidenceId: "evidence-2",
+        quote: "Reliable evaluations use frozen inputs",
+      },
+    ],
+  });
+  const modelSource = JSON.stringify({
+    ...JSON.parse(source),
+    id: modelSourceId,
+    insightId: modelInsightId,
+    source: { id: "model-fixture-source", name: "Model Fixture Source" },
+    title: "Reliable model architecture 2",
+    officialUrl: "https://example.com/reliable-model-2",
+    insightUrl: `/insights/${modelInsightId}/`,
+  });
   const insightPath = `data/insights/${insightId}.json`;
   const sourcePath = `data/sources/${sourceId}.json`;
+  const modelInsightPath = `data/insights/${modelInsightId}.json`;
+  const modelSourcePath = `data/sources/${modelSourceId}.json`;
   const extraSourceId = "source-000000000000000000000001";
   const extraSource = JSON.stringify({
     ...JSON.parse(source),
@@ -114,7 +257,9 @@ export const writePublicationFixture = async (
   await mkdir(join(root, "data", "insights"), { recursive: true });
   await mkdir(join(root, "data", "sources"), { recursive: true });
   await writeFile(join(root, insightPath), insight);
+  await writeFile(join(root, modelInsightPath), modelInsight);
   await writeFile(join(root, sourcePath), source);
+  await writeFile(join(root, modelSourcePath), modelSource);
   if (options.extraSourceReferencingInsight) {
     await writeFile(join(root, extraSourcePath), extraSource);
   }
@@ -130,9 +275,10 @@ export const writePublicationFixture = async (
   }
   const entrypoints = {
     home: "data/home.json",
-    insights: [insightPath],
+    insights: [insightPath, modelInsightPath],
     sources: [
       sourcePath,
+      modelSourcePath,
       ...(options.extraSourceReferencingInsight ? [extraSourcePath] : []),
     ],
   };
@@ -151,6 +297,16 @@ export const writePublicationFixture = async (
       path: sourcePath,
       mediaType: "application/json" as const,
       sha256: sha256(source),
+    },
+    {
+      path: modelInsightPath,
+      mediaType: "application/json" as const,
+      sha256: sha256(modelInsight),
+    },
+    {
+      path: modelSourcePath,
+      mediaType: "application/json" as const,
+      sha256: sha256(modelSource),
     },
     ...(options.extraSourceReferencingInsight
       ? [

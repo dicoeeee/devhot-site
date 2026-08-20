@@ -5,14 +5,12 @@ import SiteLayout from "../layouts/SiteLayout.astro";
 
 export async function getStaticPaths() {
   const repository = await createSiteContentRepository();
-  const home = await repository.getHome();
+  const homes = await repository.listHomes();
 
-  return [
-    {
-      params: { domain: home.domain.id },
-      props: { home },
-    },
-  ];
+  return homes.map((home) => ({
+    params: { domain: home.domain.id },
+    props: { home },
+  }));
 }
 
 interface Props {
@@ -20,6 +18,12 @@ interface Props {
 }
 
 const { home } = Astro.props;
+const displayDate = (value: string): string =>
+  new Intl.DateTimeFormat("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    timeZone: "Asia/Shanghai",
+  }).format(new Date(value));
 ---
 
 <SiteLayout
@@ -40,14 +44,29 @@ const { home } = Astro.props;
         <span>{home.brand.journal}</span>
       </span>
     </a>
+    <nav class="reading-entry-nav" aria-label="阅读入口">
+      <a data-reading-entry="timeline" aria-disabled="true">时间线</a>
+      <a data-reading-entry="topics" aria-disabled="true">主题</a>
+    </nav>
     <p class="attribution">{home.brand.attribution}</p>
   </header>
 
   <main>
     <section class="domain-state" data-domain-status={home.domain.id}>
       <div>
-        <p class="section-label">CURRENT DOMAIN</p>
-        <a href={home.domain.url} aria-current="page">{home.domain.name}</a>
+        <p class="section-label">整页阅读领域</p>
+        <nav class="domain-switch" aria-label="选择整页阅读领域">
+          {
+            home.availableDomains.map((domain) => (
+              <a
+                href={domain.url}
+                aria-current={domain.id === home.domain.id ? "page" : undefined}
+              >
+                {domain.name}
+              </a>
+            ))
+          }
+        </nav>
       </div>
       <div class="publication-state">
         <span>{home.status.label}</span>
@@ -55,10 +74,121 @@ const { home } = Astro.props;
       </div>
     </section>
 
-    <article class="lead-story">
-      <p class="kicker">{home.intro.kicker}</p>
-      <h1>{home.intro.headline}</h1>
-      <p class="summary">{home.intro.summary}</p>
-    </article>
+    {
+      home.layout === "legacy" ? (
+        <article class="lead-story">
+          <p class="kicker">{home.intro.kicker}</p>
+          <h1>{home.intro.headline}</h1>
+          <p class="summary">{home.intro.summary}</p>
+        </article>
+      ) : (
+        <>
+          <article class="weekly-focus" aria-labelledby="weekly-focus-title">
+            <div class="weekly-copy">
+              <p class="kicker">上周焦点 · {home.domain.name}</p>
+              <h1 id="weekly-focus-title">{home.weeklyFocus.overview}</h1>
+              <p class="weekly-period">
+                <time datetime={home.weeklyFocus.weekStart}>
+                  {home.weeklyFocus.weekStart}
+                </time>
+                <span aria-hidden="true">—</span>
+                <time datetime={home.weeklyFocus.weekEnd}>
+                  {home.weeklyFocus.weekEnd}
+                </time>
+              </p>
+            </div>
+            <dl class="weekly-stats">
+              <div>
+                <dt>上周入选</dt>
+                <dd>
+                  {home.weeklyFocus.selectedCount}
+                  <span>篇</span>
+                </dd>
+              </div>
+              <div class="source-stat" data-source-coverage>
+                <dt>覆盖来源</dt>
+                <dd>
+                  <button
+                    type="button"
+                    class="source-coverage-trigger"
+                    data-source-coverage-trigger
+                    aria-haspopup="dialog"
+                    aria-expanded="false"
+                    aria-label={`查看 ${home.weeklyFocus.sources.length} 个覆盖来源`}
+                    aria-controls={`source-coverage-${home.domain.id}`}
+                  >
+                    {home.weeklyFocus.sources.length}
+                    <span>个</span>
+                  </button>
+                </dd>
+                <dialog
+                  data-source-coverage-dialog
+                  id={`source-coverage-${home.domain.id}`}
+                  aria-labelledby={`source-coverage-title-${home.domain.id}`}
+                >
+                  <header>
+                    <h2 id={`source-coverage-title-${home.domain.id}`}>覆盖来源</h2>
+                    <button
+                      type="button"
+                      data-source-coverage-close
+                      aria-label="关闭来源覆盖信息"
+                    >
+                      关闭
+                    </button>
+                  </header>
+                  <ul>
+                    {home.weeklyFocus.sources.map((source) => (
+                      <li>
+                        <span>{source.name}</span>
+                        <strong>{source.count} 篇</strong>
+                      </li>
+                    ))}
+                  </ul>
+                </dialog>
+              </div>
+            </dl>
+          </article>
+
+          <section
+            class="recent-section"
+            id="recent-insights"
+            aria-labelledby="recent-title"
+          >
+            <header class="recent-heading">
+              <div>
+                <p class="section-label">CURRENT INSIGHTS</p>
+                <h2 id="recent-title">近期洞察</h2>
+              </div>
+              <p>
+                {home.domain.name} · {home.recentInsights.length} 条
+              </p>
+            </header>
+            <ol class="recent-list">
+              {home.recentInsights.map((insight) => (
+                <li data-recent-insight={insight.id}>
+                  <a href={insight.url} aria-label={`阅读：${insight.title}`}>
+                    <span class="recent-index">
+                      <b>{String(insight.sequence).padStart(2, "0")}</b>
+                      <time datetime={insight.contentDate.value}>
+                        {displayDate(insight.contentDate.value)}
+                      </time>
+                    </span>
+                    <article>
+                      <p class="recent-meta">
+                        <span>{insight.source.name}</span>
+                        <em>{insight.status.label}</em>
+                      </p>
+                      <h3>{insight.title}</h3>
+                      <p>{insight.summary}</p>
+                    </article>
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </section>
+          <script is:inline src="/scripts/source-coverage.js" defer />
+        </>
+      )
+    }
   </main>
 </SiteLayout>

@@ -2,7 +2,7 @@
 
 `devhot-site`
 是 DEVHOT 的公开静态网站构建仓库。当前切片从一份受控、版本化的 fixture 出发，经输入验证、只读内容端口和唯一 composition
-root，生成首页、当前洞察详情与独立来源归档。
+root，生成按领域切换的编辑型首页、当前洞察详情与独立来源归档。
 
 ## 当前边界
 
@@ -11,7 +11,10 @@ root，生成首页、当前洞察详情与独立来源归档。
 - 页面只通过 `SiteContentRepository` 获取稳定对象，不直接读取
   `site-input/`、Manifest或文件系统。
 - `site-input/manifest.json` 完整枚举结构数据和内容寻址资源；未声明文件会使构建失败。
-- 当前 fixture 生成 `/software-engineering/`、一条 `/insights/<id>/` 和对应
+- `/` 通过内容端口确定性规范化到输入声明的默认领域；当前 v2 fixture 的默认领域是
+  `/software-engineering/`，并同时生成 `/software-engineering/` 与
+  `/model-research/`，领域切换会更换整页上周焦点、来源覆盖和近期洞察。
+- 当前 fixture 为两个领域各生成一条 `/insights/<id>/` 和对应
   `/sources/<id>/`；两类内容页使用双向稳定链接，仍不代表七类正式读者页面已经全部实施。
 - 仓库不包含 Devhot SQLite、日志、凭据、私有运行状态或未经确认的内容。
 
@@ -61,6 +64,10 @@ Astro pages → dist/ → output verifier
 不依赖物理输入布局；`src/content/adapters/publication-input/`
 是当前唯一静态适配器。Manifest 只允许引用已声明并校验 SHA-256 的文件；未知文件、悬空引用和没有任何公开对象引用的资源都会使门禁失败。来源缺少可靠发布时间时保留
 `first_collected_at`，页面显示“抓取于”，不会改写为发布时间。
+
+首页输入契约以 `schemaVersion: 2`
+增加两个受控领域、固定默认领域、完整自然周范围、冻结周度概览、来源覆盖计数和一至五条有序近期洞察引用。Validator要求领域集合完整且不重复、来源计数之和等于入选数、近期洞察不重复且与领域一致；零条、超过五条、错误领域和缺失必填内容都会阻断构建。构建器继续接受旧的
+`schemaVersion: 1` 单领域首页输入，并通过原有只读端口生成旧版页面对象。
 
 ## 固定构建运行时
 

@@ -20,7 +20,10 @@ describe("publication output", () => {
     const input = await validatePublicationInput(join(projectRoot, "site-input"));
     expectedPublicationId = input.publicationId;
     expectedRoutes = [
-      input.home.domain.url,
+      "/",
+      ...(input.home.schemaVersion === 1
+        ? [input.home.domain.url]
+        : input.home.domains.map((home) => home.domain.url)),
       ...input.insights.map((insight) => `/insights/${insight.id}/`),
       ...input.sources.map((source) => `/sources/${source.id}/`),
     ].sort();

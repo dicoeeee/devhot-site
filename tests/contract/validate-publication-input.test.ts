@@ -11,8 +11,97 @@ describe("validatePublicationInput", () => {
     const verified = await validatePublicationInput(fixture.root);
 
     expect(verified.publicationId).toBe(fixture.publicationId);
-    expect(verified.home.domain.url).toBe("/software-engineering/");
+    expect(verified.home).toMatchObject({
+      schemaVersion: 2,
+      defaultDomain: "software-engineering",
+      domains: [
+        {
+          domain: { id: "software-engineering" },
+          weeklyFocus: { overview: "冻结的软件工程周度概览。" },
+          recentInsights: [{ insightId: fixture.insightId, status: "new" }],
+        },
+        {
+          domain: { id: "model-research" },
+          weeklyFocus: { overview: "冻结的模型研发周度概览。" },
+          recentInsights: [
+            { insightId: "insight-000000000000000000000002", status: "updated" },
+          ],
+        },
+      ],
+    });
     expect(verified.assets.get(fixture.logoPath)?.sha256).toBe(fixture.logoSha256);
+  });
+
+  it("continues to accept the legacy extensible-domain home contract", async () => {
+    const fixture = await writePublicationFixture({
+      legacyHomeContract: true,
+      invalidEditorialDomain: true,
+    });
+
+    const verified = await validatePublicationInput(fixture.root);
+
+    expect(verified.home).toMatchObject({
+      schemaVersion: 1,
+      domain: { id: "operations", url: "/operations/" },
+    });
+  });
+
+  it("rejects a recent selection that repeats an insight", async () => {
+    const fixture = await writePublicationFixture({
+      recentInsightSelection: "duplicate",
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "duplicate recent insight",
+    );
+  });
+
+  it("rejects a recent selection from another domain", async () => {
+    const fixture = await writePublicationFixture({
+      recentInsightSelection: "cross-domain",
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "recent insight/domain mismatch",
+    );
+  });
+
+  it.each([
+    [
+      { duplicateEditorialDomain: "model-research" as const },
+      "default editorial domain is unavailable",
+    ],
+    [
+      { duplicateEditorialDomain: "software-engineering" as const },
+      "duplicate editorial domain",
+    ],
+    [
+      { weeklySourceCounts: "mismatch" as const },
+      "weekly source counts do not match selectedCount",
+    ],
+    [{ weeklySourceCounts: "duplicate" as const }, "duplicate weekly source"],
+    [{ invalidWeeklyRange: true }, "weekly focus must be a completed natural week"],
+    [
+      { staleWeeklyRange: true },
+      "weekly focus must be the most recent completed natural week",
+    ],
+  ])("rejects an incoherent editorial domain projection (%s)", async (options, error) => {
+    const fixture = await writePublicationFixture(options);
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(error);
+  });
+
+  it.each([
+    [{ invalidEditorialDomain: true }, "unknown domain"],
+    [{ missingWeeklyOverview: true }, "missing frozen weekly overview"],
+    [{ recentInsightSelection: "empty" as const }, "zero recent insights"],
+    [{ recentInsightSelection: "overflow" as const }, "more than five insights"],
+  ])("rejects editorial input with %s (%s)", async (options, _description) => {
+    const fixture = await writePublicationFixture(options);
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "invalid home page input",
+    );
   });
 
   it("rejects a physical file that the manifest did not declare", async () => {

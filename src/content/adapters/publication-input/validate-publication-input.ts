@@ -250,6 +250,64 @@ export const validatePublicationInput = async (
 
   const sourcesById = new Map(sources.map((source) => [source.id, source]));
   const insightsById = new Map(insights.map((insight) => [insight.id, insight]));
+  if (home.schemaVersion === 2) {
+    const domainIds = home.domains.map((domainHome) => domainHome.domain.id);
+    if (!domainIds.includes(home.defaultDomain)) {
+      throw new Error("default editorial domain is unavailable");
+    }
+    assertUnique(domainIds, "editorial domain");
+    for (const domainHome of home.domains) {
+      const weekStart = Date.parse(`${domainHome.weeklyFocus.weekStart}T00:00:00Z`);
+      const weekEnd = Date.parse(`${domainHome.weeklyFocus.weekEnd}T00:00:00Z`);
+      const updatedAt = Date.parse(`${domainHome.status.updatedAt}T00:00:00Z`);
+      if (
+        !Number.isFinite(weekStart) ||
+        !Number.isFinite(weekEnd) ||
+        !Number.isFinite(updatedAt) ||
+        new Date(weekStart).getUTCDay() !== 1 ||
+        weekEnd - weekStart !== 6 * 24 * 60 * 60 * 1000 ||
+        weekEnd >= updatedAt
+      ) {
+        throw new Error(
+          `weekly focus must be a completed natural week: ${domainHome.domain.id}`,
+        );
+      }
+      const daysSinceMonday = (new Date(updatedAt).getUTCDay() + 6) % 7;
+      const currentWeekStart = updatedAt - daysSinceMonday * 24 * 60 * 60 * 1000;
+      const expectedWeekEnd = currentWeekStart - 24 * 60 * 60 * 1000;
+      const expectedWeekStart = expectedWeekEnd - 6 * 24 * 60 * 60 * 1000;
+      if (weekStart !== expectedWeekStart || weekEnd !== expectedWeekEnd) {
+        throw new Error(
+          `weekly focus must be the most recent completed natural week: ${domainHome.domain.id}`,
+        );
+      }
+      assertUnique(
+        domainHome.weeklyFocus.sources.map((source) => source.name),
+        `weekly source for ${domainHome.domain.id}`,
+      );
+      const selectedCount = domainHome.weeklyFocus.sources.reduce(
+        (total, source) => total + source.count,
+        0,
+      );
+      if (selectedCount !== domainHome.weeklyFocus.selectedCount) {
+        throw new Error(
+          `weekly source counts do not match selectedCount: ${domainHome.domain.id}`,
+        );
+      }
+      assertUnique(
+        domainHome.recentInsights.map((recent) => recent.insightId),
+        `recent insight for ${domainHome.domain.id}`,
+      );
+      for (const recent of domainHome.recentInsights) {
+        const insight = insightsById.get(recent.insightId);
+        if (!insight || insight.domain !== domainHome.domain.id) {
+          throw new Error(
+            `recent insight/domain mismatch: ${domainHome.domain.id}/${recent.insightId}`,
+          );
+        }
+      }
+    }
+  }
   for (const insight of insights) {
     const source = sourcesById.get(insight.sourceId);
     if (
