@@ -6,13 +6,23 @@
   "required": [
     "schemaVersion",
     "publicationId",
+    "candidate",
     "builderCompatibility",
     "entrypoints",
     "files"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "const": 2 },
     "publicationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "candidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baselineSha", "inputIdentity"],
+      "properties": {
+        "baselineSha": { "type": "string", "pattern": "^[a-f0-9]{40}$" },
+        "inputIdentity": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    },
     "builderCompatibility": {
       "type": "object",
       "additionalProperties": false,
@@ -28,9 +38,27 @@
     "entrypoints": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["home"],
+      "required": ["home", "insights", "sources"],
       "properties": {
-        "home": { "type": "string", "pattern": "^data/[a-z0-9][a-z0-9._/-]*\\.json$" }
+        "home": { "type": "string", "pattern": "^data/[a-z0-9][a-z0-9._/-]*\\.json$" },
+        "insights": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^data/insights/[a-z0-9][a-z0-9-]*\\.json$"
+          }
+        },
+        "sources": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^data/sources/[a-z0-9][a-z0-9-]*\\.json$"
+          }
+        }
       }
     },
     "files": {

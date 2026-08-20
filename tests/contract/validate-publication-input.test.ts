@@ -1,4 +1,4 @@
-import { appendFile, writeFile } from "node:fs/promises";
+import { appendFile, readFile, writeFile } from "node:fs/promises";
 import { describe, expect, it } from "vitest";
 
 import { validatePublicationInput } from "../../src/content/adapters/publication-input/validate-publication-input";
@@ -10,7 +10,7 @@ describe("validatePublicationInput", () => {
 
     const verified = await validatePublicationInput(fixture.root);
 
-    expect(verified.publicationId).toBe("fixture-2026-08-19");
+    expect(verified.publicationId).toBe(fixture.publicationId);
     expect(verified.home.domain.url).toBe("/software-engineering/");
     expect(verified.assets.get(fixture.logoPath)?.sha256).toBe(fixture.logoSha256);
   });
@@ -38,6 +38,58 @@ describe("validatePublicationInput", () => {
 
     await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
       "logoAssetPath must reference a declared PNG asset",
+    );
+  });
+
+  it("rejects a manifest asset that no public content object references", async () => {
+    const fixture = await writePublicationFixture({ unreferencedAsset: true });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "manifest asset is not referenced by public content",
+    );
+  });
+
+  it("rejects a declared JSON file that is not a typed entrypoint", async () => {
+    const fixture = await writePublicationFixture({ unreferencedJson: true });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "manifest JSON files must exactly match typed entrypoints",
+    );
+  });
+
+  it("rejects a source that claims an insight owned by another source", async () => {
+    const fixture = await writePublicationFixture({
+      extraSourceReferencingInsight: true,
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "source/insight reference mismatch",
+    );
+  });
+
+  it("rejects a candidate identity that does not match its frozen input", async () => {
+    const fixture = await writePublicationFixture();
+    const manifestPath = `${fixture.root}/manifest.json`;
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    const forgedIdentity = "f".repeat(64);
+    manifest.candidate.inputIdentity = forgedIdentity;
+    manifest.publicationId = `candidate-${forgedIdentity.slice(0, 24)}`;
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "candidate input identity does not match manifest content",
+    );
+  });
+
+  it("binds the publication identity to the verified input identity", async () => {
+    const fixture = await writePublicationFixture();
+    const manifestPath = `${fixture.root}/manifest.json`;
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    manifest.publicationId = "forged-publication";
+    await writeFile(manifestPath, JSON.stringify(manifest));
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "publicationId must be derived from candidate inputIdentity",
     );
   });
 });

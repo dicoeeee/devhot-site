@@ -1,0 +1,65 @@
+---
+import { createSiteContentRepository } from "../../content/composition-root";
+import type { InsightPage } from "../../content/model/insight-page";
+import SiteLayout from "../../layouts/SiteLayout.astro";
+
+export async function getStaticPaths() {
+  const repository = await createSiteContentRepository();
+  const insights = await repository.listInsights();
+  return insights.map((insight) => ({ params: { id: insight.id }, props: { insight } }));
+}
+
+interface Props {
+  insight: InsightPage;
+}
+
+const { insight } = Astro.props;
+const dateLabel = insight.contentDate.basis === "published_at" ? "发布于" : "抓取于";
+---
+
+<SiteLayout title={`${insight.title} · DEVHOT`} canonicalPath={insight.url}>
+  <main class="reading-page insight-page">
+    <p class="section-label">当前洞察 · {insight.domain}</p>
+    <h1>{insight.title}</h1>
+    <p>
+      <span>{dateLabel}</span>
+      <time datetime={insight.contentDate.value}>{insight.contentDate.value}</time>
+    </p>
+    <section>
+      <h2>核心判断</h2>
+      <p>{insight.summary}</p>
+    </section>
+    {
+      insight.mechanism.status === "present" && (
+        <section>
+          <h2>技术机制</h2>
+          {insight.mechanism.blocks.map((block) => (
+            <p>{block.text}</p>
+          ))}
+        </section>
+      )
+    }
+    <section>
+      <h2>关键解读</h2>
+      <p>{insight.keyInterpretation}</p>
+    </section>
+    <section>
+      <h2>领域启示</h2>
+      <p>{insight.domainImplications}</p>
+    </section>
+    {
+      insight.citations.length > 0 && (
+        <section>
+          <h2>引用</h2>
+          {insight.citations.map((citation) => (
+            <blockquote>{citation.quote}</blockquote>
+          ))}
+        </section>
+      )
+    }
+    <nav aria-label="洞察来源">
+      <a href={insight.sourceUrl}>阅读归档原文</a>
+      <a href={insight.officialUrl}>访问官方原文</a>
+    </nav>
+  </main>
+</SiteLayout>
