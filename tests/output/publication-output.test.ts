@@ -14,6 +14,9 @@ const projectRoot = process.cwd();
 const distRoot = join(projectRoot, "dist");
 let expectedPublicationId = "";
 let expectedRoutes: string[] = [];
+let inputLogoPath = "";
+let outputLogoPath = "";
+let defaultDomainOutputSegments: string[] = [];
 
 describe("publication output", () => {
   beforeAll(async () => {
@@ -27,6 +30,21 @@ describe("publication output", () => {
       ...input.insights.map((insight) => `/insights/${insight.id}/`),
       ...input.sources.map((source) => `/sources/${source.id}/`),
     ].sort();
+    const logo = input.assets.get(input.home.masthead.logoAssetPath);
+    if (!logo) throw new Error("validated masthead logo is unavailable");
+    inputLogoPath = logo.fullPath;
+    outputLogoPath = join(distRoot, "media", "sha256", `${logo.sha256}.png`);
+    let defaultDomainUrl: string | undefined;
+    if (input.home.schemaVersion === 1) {
+      defaultDomainUrl = input.home.domain.url;
+    } else {
+      const defaultDomain = input.home.defaultDomain;
+      defaultDomainUrl = input.home.domains.find(
+        (domainHome) => domainHome.domain.id === defaultDomain,
+      )?.domain.url;
+    }
+    if (!defaultDomainUrl) throw new Error("validated default domain is unavailable");
+    defaultDomainOutputSegments = defaultDomainUrl.split("/").filter(Boolean);
     await rm(distRoot, { recursive: true, force: true });
     await execFileAsync(
       process.execPath,
@@ -39,24 +57,9 @@ describe("publication output", () => {
     });
   });
 
-  it("copies the original CIMC bytes and verifies a self-contained distribution", async () => {
-    const inputLogo = await readFile(
-      join(
-        projectRoot,
-        "site-input",
-        "assets",
-        "sha256",
-        "73bc08f1a558271ed021a4f51fcc4a07d2850deea7cb592282ae0f9d5a110c89.png",
-      ),
-    );
-    const outputLogo = await readFile(
-      join(
-        distRoot,
-        "media",
-        "sha256",
-        "73bc08f1a558271ed021a4f51fcc4a07d2850deea7cb592282ae0f9d5a110c89.png",
-      ),
-    );
+  it("copies the declared masthead bytes and verifies a self-contained distribution", async () => {
+    const inputLogo = await readFile(inputLogoPath);
+    const outputLogo = await readFile(outputLogoPath);
 
     expect(outputLogo.equals(inputLogo)).toBe(true);
     await expect(verifyDistribution({ distRoot })).resolves.toEqual(
@@ -73,7 +76,7 @@ describe("publication output", () => {
       const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
       await cp(distRoot, tamperedDist, { recursive: true });
       await appendFile(
-        join(tamperedDist, "software-engineering", "index.html"),
+        join(tamperedDist, ...defaultDomainOutputSegments, "index.html"),
         `<script src="${runtimeUrl}"></script>`,
       );
 
