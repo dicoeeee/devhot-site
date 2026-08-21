@@ -8,6 +8,8 @@ import { beforeAll, describe, expect, it } from "vitest";
 import { copyDeclaredAssets } from "../../tools/copy-assets";
 import { verifyDistribution } from "../../tools/verify-dist";
 import { validatePublicationInput } from "../../src/content/adapters/publication-input/validate-publication-input";
+import { writePublicationFixture } from "../support/publication-fixture";
+import { prepareStaticBuild } from "../support/static-build";
 
 const execFileAsync = promisify(execFile);
 const projectRoot = process.cwd();
@@ -86,6 +88,31 @@ describe("publication output", () => {
         routes: expectedRoutes,
       }),
     );
+  });
+
+  it("declares and verifies the stable first page of an empty topic", async () => {
+    const fixture = await writePublicationFixture({
+      emptyTopic: true,
+      topicJudgment: "none",
+    });
+    const buildRoot = await prepareStaticBuild(fixture.root);
+    const emptyTopicDist = join(buildRoot, "dist");
+    await execFileAsync(
+      process.execPath,
+      [join(projectRoot, "node_modules", "astro", "bin", "astro.mjs"), "build"],
+      { cwd: buildRoot },
+    );
+    await copyDeclaredAssets({
+      inputRoot: fixture.root,
+      distRoot: emptyTopicDist,
+    });
+
+    const metadata = await verifyDistribution({ distRoot: emptyTopicDist });
+
+    expect(metadata.routes).toContain(`/topics/${fixture.topicId}/`);
+    expect(metadata.routes).not.toContain(`/topics/${fixture.topicId}/page/2/`);
+    expect(metadata.routes).toContain("/software-engineering/topics/");
+    expect(metadata.routes).toContain("/model-research/topics/");
   });
 
   it.each(["https://example.com/runtime.js", "//cdn.example/runtime.js"])(

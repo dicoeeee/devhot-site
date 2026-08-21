@@ -5,12 +5,11 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { validatePublicationInput } from "../src/content/adapters/publication-input/validate-publication-input";
+import { createPublicationInputRepository } from "../src/content/adapters/publication-input/publication-input-repository";
 import {
   insightRoute,
   mediaAssetRoute,
   sourceArchiveRoute,
-  topicOverviewRoute,
-  topicRoute,
 } from "../src/content/model/site-routes";
 
 const execFileAsync = promisify(execFile);
@@ -40,6 +39,11 @@ export const copyDeclaredAssets = async ({
   distRoot,
 }: CopyDeclaredAssetsOptions): Promise<void> => {
   const input = await validatePublicationInput(inputRoot);
+  const repository = createPublicationInputRepository(input);
+  const [topicOverviews, topicPages] = await Promise.all([
+    repository.listTopicOverviews(),
+    repository.listTopicPages(),
+  ]);
   const mediaRoot = join(distRoot, "media", "sha256");
   await rm(join(distRoot, "media"), { recursive: true, force: true });
   await mkdir(mediaRoot, { recursive: true });
@@ -62,21 +66,8 @@ export const copyDeclaredAssets = async ({
         : input.home.domains.map((home) => home.domain.url)),
       ...input.insights.map((insight) => insightRoute(insight.id)),
       ...input.sources.map((source) => sourceArchiveRoute(source.id)),
-      ...(input.topics
-        ? [
-            ...new Set(
-              input.topics.topics.flatMap((topic) =>
-                topic.domains.map((domain) => topicOverviewRoute(domain)),
-              ),
-            ),
-            ...input.topics.topics.flatMap((topic) =>
-              Array.from(
-                { length: Math.ceil(topic.currentMemberInsightIds.length / 5) },
-                (_, index) => topicRoute(topic.id, index + 1),
-              ),
-            ),
-          ]
-        : []),
+      ...topicOverviews.map((overview) => overview.url),
+      ...topicPages.map((page) => page.url),
     ].sort(),
     assets: assets.map((asset) => ({
       url: mediaAssetRoute(asset.sha256),
