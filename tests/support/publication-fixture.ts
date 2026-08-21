@@ -11,6 +11,7 @@ import {
 interface PublicationFixtureOptions {
   readonly danglingLogoReference?: boolean;
   readonly duplicateEditorialDomain?: "model-research" | "software-engineering";
+  readonly emptyTopic?: boolean;
   readonly extraSourceReferencingInsight?: boolean;
   readonly invalidEditorialDomain?: boolean;
   readonly insightDomainMembership?:
@@ -18,10 +19,12 @@ interface PublicationFixtureOptions {
   readonly invalidWeeklyRange?: boolean;
   readonly legacyHomeContract?: boolean;
   readonly missingWeeklyOverview?: boolean;
+  readonly omitTopics?: boolean;
   readonly recentInsightSelection?:
     "complete" | "cross-domain" | "duplicate" | "empty" | "overflow";
   readonly staleWeeklyRange?: boolean;
   readonly topicJudgment?: "confirmed" | "none";
+  readonly topicJudgmentVersion?: number;
   readonly topicRuleViolation?: "duplicate-type" | "nested" | "not" | "member-mismatch";
   readonly unreferencedAsset?: boolean;
   readonly unreferencedJson?: boolean;
@@ -281,8 +284,9 @@ export const writePublicationFixture = async (
   const unreferencedJsonPath = "data/private-draft.json";
   const topicId = "reliable-agent-delivery";
   const topicPath = "data/topics.json";
-  const topicConditions =
-    options.topicRuleViolation === "duplicate-type"
+  const topicConditions = options.emptyTopic
+    ? [{ tagType: "problem", anyOf: ["security"] }]
+    : options.topicRuleViolation === "duplicate-type"
       ? [
           { tagType: "problem", anyOf: ["reliability"] },
           { tagType: "problem", anyOf: ["security"] },
@@ -309,8 +313,9 @@ export const writePublicationFixture = async (
         scope: "Agent 变更如何绑定冻结输入、独立验证与最终准入。",
         domains: ["software-engineering", "model-research"],
         tagFilters: topicConditions,
-        currentMemberInsightIds:
-          options.topicRuleViolation === "member-mismatch"
+        currentMemberInsightIds: options.emptyTopic
+          ? []
+          : options.topicRuleViolation === "member-mismatch"
             ? [insightId]
             : [insightId, modelInsightId],
         ...(options.topicJudgment === "none"
@@ -319,7 +324,7 @@ export const writePublicationFixture = async (
               latestConfirmedJudgment: {
                 id: "topic-judgment-reliable-agent-delivery-1",
                 sequence: 1,
-                topicVersion: 2,
+                topicVersion: options.topicJudgmentVersion ?? 3,
                 matchingRulesVersion: "same-type-or-cross-type-and-v1",
                 statement: "可靠 Agent 交付正在从生成能力转向可验证的变更闭环。",
                 boundary: "证据来自具备独立检查和明确最终准入权的工程系统。",
@@ -350,7 +355,8 @@ export const writePublicationFixture = async (
   await writeFile(join(root, "data", "home.json"), home);
   await mkdir(join(root, "data", "insights"), { recursive: true });
   await mkdir(join(root, "data", "sources"), { recursive: true });
-  if (!options.legacyHomeContract) {
+  const includesTopics = !options.legacyHomeContract && !options.omitTopics;
+  if (includesTopics) {
     await writeFile(join(root, topicPath), topics);
   }
   await writeFile(join(root, insightPath), insight);
@@ -378,7 +384,7 @@ export const writePublicationFixture = async (
       modelSourcePath,
       ...(options.extraSourceReferencingInsight ? [extraSourcePath] : []),
     ],
-    ...(options.legacyHomeContract ? {} : { topics: topicPath }),
+    ...(includesTopics ? { topics: topicPath } : {}),
   };
   const files = [
     {
@@ -406,15 +412,15 @@ export const writePublicationFixture = async (
       mediaType: "application/json" as const,
       sha256: sha256(modelSource),
     },
-    ...(options.legacyHomeContract
-      ? []
-      : [
+    ...(includesTopics
+      ? [
           {
             path: topicPath,
             mediaType: "application/json" as const,
             sha256: sha256(topics),
           },
-        ]),
+        ]
+      : []),
     ...(options.extraSourceReferencingInsight
       ? [
           {

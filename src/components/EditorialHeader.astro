@@ -4,7 +4,7 @@ import type { HomePage } from "../content/model/home-page";
 interface Props {
   brand: HomePage["brand"];
   homeUrl: string;
-  topicsUrl: string;
+  topicsUrl: string | undefined;
   active: "home" | "topics";
 }
 
@@ -21,11 +21,21 @@ const { brand, homeUrl, topicsUrl, active } = Astro.props;
   </a>
   <nav class="reading-entry-nav" aria-label="阅读入口">
     <a data-reading-entry="timeline" aria-disabled="true">时间线</a>
-    <a
-      data-reading-entry="topics"
-      href={topicsUrl}
-      aria-current={active === "topics" ? "page" : undefined}>主题</a
-    >
+    {
+      topicsUrl ? (
+        <a
+          data-reading-entry="topics"
+          href={topicsUrl}
+          aria-current={active === "topics" ? "page" : undefined}
+        >
+          主题
+        </a>
+      ) : (
+        <a data-reading-entry="topics" aria-disabled="true">
+          主题
+        </a>
+      )
+    }
   </nav>
   <p class="attribution">{brand.attribution}</p>
 </header>

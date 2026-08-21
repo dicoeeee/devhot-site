@@ -375,7 +375,7 @@ export const validatePublicationInput = async (
       const judgment = topic.latestConfirmedJudgment;
       if (judgment) {
         if (
-          judgment.topicVersion > topic.version ||
+          judgment.topicVersion !== topic.version ||
           (judgment.sequence === 1 && judgment.evidence.articleCount < 4) ||
           judgment.evidence.sourceCount < 2 ||
           judgment.evidence.dateFrom > judgment.evidence.dateTo

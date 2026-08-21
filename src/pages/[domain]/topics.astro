@@ -65,7 +65,10 @@ const { overview } = Astro.props;
                 <span>{String(index + 1).padStart(2, "0")}</span>
                 <article>
                   <p>
-                    VERSION {topic.version} · 更新于 {topic.latestMemberDate.slice(0, 10)}
+                    VERSION {topic.version} ·{" "}
+                    {topic.latestMemberDate
+                      ? `更新于 ${topic.latestMemberDate.slice(0, 10)}`
+                      : "当前无成员"}
                   </p>
                   <h3>
                     <a href={topic.url}>{topic.name}</a>

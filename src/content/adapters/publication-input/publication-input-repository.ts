@@ -33,6 +33,7 @@ export const createPublicationInputRepository = (
       return [
         {
           layout: "legacy",
+          ...(input.topics ? { topicsUrl: topicOverviewRoute(home.domain.id) } : {}),
           domain: { ...home.domain },
           isDefault: true,
           availableDomains: [{ ...home.domain }],
@@ -49,6 +50,7 @@ export const createPublicationInputRepository = (
     const insightsById = new Map(input.insights.map((insight) => [insight.id, insight]));
     return home.domains.map((domainHome) => ({
       layout: "editorial" as const,
+      ...(input.topics ? { topicsUrl: topicOverviewRoute(domainHome.domain.id) } : {}),
       domain: { ...domainHome.domain },
       isDefault: domainHome.domain.id === home.defaultDomain,
       availableDomains,
@@ -209,15 +211,21 @@ export const createPublicationInputRepository = (
     return input.topics.topics.flatMap((topic) => {
       const primaryDomain = topic.domains[0];
       if (!primaryDomain) throw new Error(`verified topic has no domain: ${topic.id}`);
-      const related = sortedTopicMembers(topic).map((insight) => ({
-        id: insight.id,
-        url: insight.url,
-        title: insight.title,
-        summary: insight.summary,
-        sourceName: sourcesByInsightId.get(insight.id)?.source.name ?? "",
-        contentDate: { ...insight.contentDate },
-      }));
-      const pageCount = Math.ceil(related.length / 5);
+      const related = sortedTopicMembers(topic).map((insight) => {
+        const source = sourcesByInsightId.get(insight.id);
+        if (!source) {
+          throw new Error(`verified topic source is unavailable: ${insight.id}`);
+        }
+        return {
+          id: insight.id,
+          url: insight.url,
+          title: insight.title,
+          summary: insight.summary,
+          sourceName: source.source.name,
+          contentDate: { ...insight.contentDate },
+        };
+      });
+      const pageCount = Math.max(1, Math.ceil(related.length / 5));
       const topicDomains = topic.domains.map((id) => {
         const domain = domainsById.get(id);
         if (!domain) throw new Error(`verified topic domain is unavailable: ${id}`);

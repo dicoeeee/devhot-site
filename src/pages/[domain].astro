@@ -1,7 +1,6 @@
 ---
 import { createSiteContentRepository } from "../content/composition-root";
 import type { HomePage } from "../content/model/home-page";
-import { topicOverviewRoute } from "../content/model/site-routes";
 import EditorialHeader from "../components/EditorialHeader.astro";
 import SiteLayout from "../layouts/SiteLayout.astro";
 
@@ -35,7 +34,7 @@ const displayDate = (value: string): string =>
   <EditorialHeader
     brand={home.brand}
     homeUrl={home.domain.url}
-    topicsUrl={topicOverviewRoute(home.domain.id)}
+    topicsUrl={home.topicsUrl}
     active="home"
   />
 

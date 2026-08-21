@@ -64,12 +64,23 @@ const lastRelated = firstRelated + page.relatedInsights.length - 1;
             </p>
             <dl>
               <div>
-                <dt>本次判断证据</dt>
+                <dt>本次判断实际使用的冻结证据</dt>
                 <dd>
                   {page.latestConfirmedJudgment.evidence.articleCount} 条洞察 ·
                   {page.latestConfirmedJudgment.evidence.sourceCount} 个来源 ·
                   {page.latestConfirmedJudgment.evidence.dateFrom}—
                   {page.latestConfirmedJudgment.evidence.dateTo}
+                </dd>
+              </div>
+              <div>
+                <dt>冻结匹配范围</dt>
+                <dd
+                  data-matching-rules-version={
+                    page.latestConfirmedJudgment.matchingRulesVersion
+                  }
+                >
+                  主题 VERSION {page.latestConfirmedJudgment.topicVersion} · 同类型标签
+                  OR， 跨类型标签 AND
                 </dd>
               </div>
               <div>

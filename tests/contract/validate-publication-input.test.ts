@@ -38,7 +38,7 @@ describe("validatePublicationInput", () => {
           id: fixture.topicId,
           version: 3,
           latestConfirmedJudgment: {
-            topicVersion: 2,
+            topicVersion: 3,
             matchingRulesVersion: "same-type-or-cross-type-and-v1",
           },
         },
@@ -59,6 +59,34 @@ describe("validatePublicationInput", () => {
       schemaVersion: 1,
       domain: { id: "operations", url: "/operations/" },
     });
+  });
+
+  it("continues to accept editorial input before the optional topic contract", async () => {
+    const fixture = await writePublicationFixture({ omitTopics: true });
+
+    const verified = await validatePublicationInput(fixture.root);
+
+    expect(verified.home.schemaVersion).toBe(2);
+    expect(verified.topics).toBeUndefined();
+  });
+
+  it("preserves a versioned topic when its current member set is empty", async () => {
+    const fixture = await writePublicationFixture({ emptyTopic: true });
+
+    const verified = await validatePublicationInput(fixture.root);
+
+    expect(verified.topics?.topics[0]).toMatchObject({
+      id: fixture.topicId,
+      currentMemberInsightIds: [],
+    });
+  });
+
+  it("rejects a judgment bound to a different topic definition version", async () => {
+    const fixture = await writePublicationFixture({ topicJudgmentVersion: 2 });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "invalid confirmed topic judgment",
+    );
   });
 
   it("accepts one insight on both domain homes with one shared identity", async () => {

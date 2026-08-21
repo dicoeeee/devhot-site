@@ -85,6 +85,21 @@ describe("static editorial domain home", () => {
     expect(root).toContain("url=/operations/");
   });
 
+  it("keeps the topic entry disabled for a valid editorial input without topics", async () => {
+    const fixture = await writePublicationFixture({ omitTopics: true });
+    const buildRoot = await prepareStaticBuild(fixture.root);
+
+    await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
+
+    const software = await readFile(
+      join(buildRoot, "dist", "software-engineering", "index.html"),
+      "utf8",
+    );
+    const topicsEntry = software.match(/<a\b[^>]*data-reading-entry="topics"[^>]*>/)?.[0];
+    expect(topicsEntry).toContain('aria-disabled="true"');
+    expect(topicsEntry).not.toMatch(/\shref=/);
+  });
+
   it("blocks page generation when the editorial home is incomplete", async () => {
     const fixture = await writePublicationFixture({ missingWeeklyOverview: true });
     const buildRoot = await prepareStaticBuild(fixture.root);

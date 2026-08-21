@@ -128,7 +128,7 @@ describe("SiteContentRepository", () => {
       currentMemberCount: 2,
       latestConfirmedJudgment: {
         statement: "可靠 Agent 交付正在从生成能力转向可验证的变更闭环。",
-        topicVersion: 2,
+        topicVersion: 3,
         matchingRulesVersion: "same-type-or-cross-type-and-v1",
       },
     });
@@ -152,17 +152,25 @@ describe("SiteContentRepository", () => {
     if (!input.topics) throw new Error("expected topic fixture");
     const base = input.insights[0];
     if (!base) throw new Error("expected insight fixture");
-    const insights = [
-      ...input.insights,
-      ...Array.from({ length: 4 }, (_, index) => ({
-        ...base,
-        id: `insight-${String(index + 3).padStart(24, "0")}`,
-        sourceId: `source-${String(index + 3).padStart(24, "0")}`,
-        title: `Topic member ${index + 3}`,
-        contentDate: {
-          ...base.contentDate,
-          value: `2026-08-${String(16 - index).padStart(2, "0")}T08:00:00+00:00`,
-        },
+    const additionalInsights = Array.from({ length: 4 }, (_, index) => ({
+      ...base,
+      id: `insight-${String(index + 3).padStart(24, "0")}`,
+      sourceId: `source-${String(index + 3).padStart(24, "0")}`,
+      title: `Topic member ${index + 3}`,
+      contentDate: {
+        ...base.contentDate,
+        value: `2026-08-${String(16 - index).padStart(2, "0")}T08:00:00+00:00`,
+      },
+    }));
+    const insights = [...input.insights, ...additionalInsights];
+    const source = input.sources[0];
+    if (!source) throw new Error("expected source fixture");
+    const sources = [
+      ...input.sources,
+      ...additionalInsights.map((insight) => ({
+        ...source,
+        id: insight.sourceId,
+        insightId: insight.id,
       })),
     ];
     const topic = input.topics.topics[0];
@@ -170,6 +178,7 @@ describe("SiteContentRepository", () => {
     const repository = createPublicationInputRepository({
       ...input,
       insights,
+      sources,
       topics: {
         ...input.topics,
         topics: [
@@ -189,5 +198,60 @@ describe("SiteContentRepository", () => {
       [1, `/topics/${topic.id}/`, 5],
       [2, `/topics/${topic.id}/page/2/`, 1],
     ]);
+  });
+
+  it("keeps one stable page for a topic with no current members", async () => {
+    const fixture = await writePublicationFixture({
+      emptyTopic: true,
+      topicJudgment: "none",
+    });
+    const repository = await createSiteContentRepository(fixture.root);
+
+    const page = (await repository.listTopicPages()).find(
+      (candidate) => candidate.id === fixture.topicId,
+    );
+
+    expect(page).toMatchObject({
+      url: `/topics/${fixture.topicId}/`,
+      topicPage: 1,
+      pageCount: 1,
+      currentMemberCount: 0,
+      relatedInsights: [],
+    });
+  });
+
+  it("fails fast when a verified topic member has no source identity", async () => {
+    const fixture = await writePublicationFixture();
+    const input = await validatePublicationInput(fixture.root);
+    if (!input.topics) throw new Error("expected topic fixture");
+    const base = input.insights[0];
+    const topic = input.topics.topics[0];
+    if (!base || !topic) throw new Error("expected topic member fixture");
+    const missingSourceInsight = {
+      ...base,
+      id: "insight-000000000000000000000099",
+      sourceId: "source-000000000000000000000099",
+      title: "Missing source topic member",
+    };
+    const repository = createPublicationInputRepository({
+      ...input,
+      insights: [...input.insights, missingSourceInsight],
+      topics: {
+        ...input.topics,
+        topics: [
+          {
+            ...topic,
+            currentMemberInsightIds: [
+              ...topic.currentMemberInsightIds,
+              missingSourceInsight.id,
+            ],
+          },
+        ],
+      },
+    });
+
+    await expect(repository.listTopicPages()).rejects.toThrow(
+      `verified topic source is unavailable: ${missingSourceInsight.id}`,
+    );
   });
 });
