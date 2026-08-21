@@ -3,9 +3,12 @@ import {
   insightRoute,
   mediaAssetRoute,
   sourceArchiveRoute,
+  topicOverviewRoute,
+  topicRoute,
+  topicTagAnchor,
 } from "../../model/site-routes";
 import type { SiteContentRepository } from "../../ports/site-content-repository";
-import type { VerifiedPublicationInput } from "./publication-input";
+import type { EditorialDomainId, VerifiedPublicationInput } from "./publication-input";
 
 export const createPublicationInputRepository = (
   input: VerifiedPublicationInput,
@@ -78,6 +81,178 @@ export const createPublicationInputRepository = (
     }));
   };
 
+  const insightPages = () =>
+    input.insights.map((insight) => ({
+      id: insight.id,
+      url: insightRoute(insight.id),
+      sourceId: insight.sourceId,
+      sourceUrl: insight.sourceUrl,
+      officialUrl: insight.officialUrl,
+      domain: insight.domain,
+      ...(insight.domains ? { domains: [...insight.domains] } : {}),
+      title: insight.title,
+      contentDate: { ...insight.contentDate },
+      summary: insight.summary,
+      mechanism: {
+        status: insight.mechanism.status,
+        blocks: insight.mechanism.blocks.map((block) => ({
+          kind: block.kind,
+          text: block.text,
+        })),
+      },
+      keyInterpretation: insight.keyInterpretation,
+      domainImplications: insight.domainImplications,
+      tags: insight.tags.map((tag) => ({ ...tag })),
+      citations: insight.citations.map((citation) => ({
+        evidenceId: citation.evidenceId,
+        quote: citation.quote,
+      })),
+    }));
+
+  const topicTagLinks = (topic: NonNullable<typeof input.topics>["topics"][number]) => {
+    const primaryDomain = topic.domains[0];
+    if (!primaryDomain) throw new Error(`verified topic has no domain: ${topic.id}`);
+    const overviewUrl = topicOverviewRoute(primaryDomain);
+    return topic.tagFilters.flatMap((filter) =>
+      filter.anyOf.map((name) => {
+        const anchorId = topicTagAnchor(filter.tagType, name);
+        return {
+          type: filter.tagType,
+          name,
+          anchorId,
+          url: `${overviewUrl}#${anchorId}`,
+        };
+      }),
+    );
+  };
+
+  const sortedTopicMembers = (
+    topic: NonNullable<typeof input.topics>["topics"][number],
+  ) => {
+    const members = new Set(topic.currentMemberInsightIds);
+    return insightPages()
+      .filter((insight) => members.has(insight.id))
+      .sort(
+        (left, right) =>
+          right.contentDate.value.localeCompare(left.contentDate.value) ||
+          left.id.localeCompare(right.id),
+      );
+  };
+
+  const topicOverviews = () => {
+    const topicCatalog = input.topics;
+    if (!topicCatalog) return [];
+    const homePages = homes();
+    return homePages.flatMap((home) => {
+      const domainId = home.domain.id;
+      if (domainId !== "software-engineering" && domainId !== "model-research") {
+        return [];
+      }
+      const editorialDomainId: EditorialDomainId = domainId;
+      const topics = topicCatalog.topics.filter((topic) =>
+        topic.domains.includes(editorialDomainId),
+      );
+      const tagByIdentity = new Map<string, ReturnType<typeof topicTagLinks>[number]>();
+      for (const topic of topics) {
+        for (const tag of topicTagLinks(topic)) {
+          const anchorId = topicTagAnchor(tag.type, tag.name);
+          tagByIdentity.set(`${tag.type}:${tag.name}`, {
+            ...tag,
+            anchorId,
+            url: `${topicOverviewRoute(editorialDomainId)}#${anchorId}`,
+          });
+        }
+      }
+      return [
+        {
+          url: topicOverviewRoute(editorialDomainId),
+          domain: {
+            id: editorialDomainId,
+            name: home.domain.name,
+            url: home.domain.url,
+          },
+          availableDomains: homePages.map((candidate) => ({
+            id: candidate.domain.id,
+            name: candidate.domain.name,
+            url: topicOverviewRoute(candidate.domain.id),
+          })),
+          brand,
+          topics: topics.map((topic) => {
+            const members = sortedTopicMembers(topic);
+            return {
+              id: topic.id,
+              url: topicRoute(topic.id),
+              version: topic.version,
+              name: topic.name,
+              scope: topic.scope,
+              tags: topicTagLinks(topic).map((tag) => ({
+                ...tag,
+                url: `${topicOverviewRoute(editorialDomainId)}#${tag.anchorId}`,
+              })),
+              memberCount: members.length,
+              latestMemberDate: members[0]?.contentDate.value ?? "",
+            };
+          }),
+          tags: [...tagByIdentity.values()].sort(
+            (left, right) =>
+              left.type.localeCompare(right.type) || left.name.localeCompare(right.name),
+          ),
+        },
+      ];
+    });
+  };
+
+  const topicPages = () => {
+    if (!input.topics) return [];
+    const homePages = homes();
+    const domainsById = new Map(homePages.map((home) => [home.domain.id, home.domain]));
+    return input.topics.topics.flatMap((topic) => {
+      const primaryDomain = topic.domains[0];
+      if (!primaryDomain) throw new Error(`verified topic has no domain: ${topic.id}`);
+      const related = sortedTopicMembers(topic).map((insight) => ({
+        id: insight.id,
+        url: insight.url,
+        title: insight.title,
+        summary: insight.summary,
+        sourceName: sourcesByInsightId.get(insight.id)?.source.name ?? "",
+        contentDate: { ...insight.contentDate },
+      }));
+      const pageCount = Math.ceil(related.length / 5);
+      const topicDomains = topic.domains.map((id) => {
+        const domain = domainsById.get(id);
+        if (!domain) throw new Error(`verified topic domain is unavailable: ${id}`);
+        return { id, name: domain.name, url: domain.url };
+      });
+      return Array.from({ length: pageCount }, (_, index) => {
+        const topicPage = index + 1;
+        return {
+          id: topic.id,
+          url: topicRoute(topic.id, topicPage),
+          topicPage,
+          pageCount,
+          version: topic.version,
+          name: topic.name,
+          scope: topic.scope,
+          domains: topicDomains,
+          brand,
+          homeUrl: topicDomains[0]?.url ?? "/",
+          topicsUrl: topicOverviewRoute(primaryDomain),
+          tags: topicTagLinks(topic),
+          currentMemberCount: related.length,
+          ...(topic.latestConfirmedJudgment
+            ? {
+                latestConfirmedJudgment: {
+                  ...topic.latestConfirmedJudgment,
+                  evidence: { ...topic.latestConfirmedJudgment.evidence },
+                },
+              }
+            : {}),
+          relatedInsights: related.slice(index * 5, index * 5 + 5),
+        };
+      });
+    });
+  };
+
   return {
     async getHome(domainId?: string): Promise<HomePage> {
       const homePages = homes();
@@ -94,32 +269,7 @@ export const createPublicationInputRepository = (
       return homes();
     },
     async listInsights() {
-      return input.insights.map((insight) => ({
-        id: insight.id,
-        url: insightRoute(insight.id),
-        sourceId: insight.sourceId,
-        sourceUrl: insight.sourceUrl,
-        officialUrl: insight.officialUrl,
-        domain: insight.domain,
-        ...(insight.domains ? { domains: [...insight.domains] } : {}),
-        title: insight.title,
-        contentDate: { ...insight.contentDate },
-        summary: insight.summary,
-        mechanism: {
-          status: insight.mechanism.status,
-          blocks: insight.mechanism.blocks.map((block) => ({
-            kind: block.kind,
-            text: block.text,
-          })),
-        },
-        keyInterpretation: insight.keyInterpretation,
-        domainImplications: insight.domainImplications,
-        tags: insight.tags.map((tag) => ({ ...tag })),
-        citations: insight.citations.map((citation) => ({
-          evidenceId: citation.evidenceId,
-          quote: citation.quote,
-        })),
-      }));
+      return insightPages();
     },
     async listSourceArchives() {
       return input.sources.map((source) => ({
@@ -143,6 +293,12 @@ export const createPublicationInputRepository = (
           };
         }),
       }));
+    },
+    async listTopicOverviews() {
+      return topicOverviews();
+    },
+    async listTopicPages() {
+      return topicPages();
     },
   };
 };

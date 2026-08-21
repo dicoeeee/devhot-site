@@ -29,6 +29,24 @@ describe("publication output", () => {
         : input.home.domains.map((home) => home.domain.url)),
       ...input.insights.map((insight) => `/insights/${insight.id}/`),
       ...input.sources.map((source) => `/sources/${source.id}/`),
+      ...(input.topics
+        ? [
+            ...new Set(
+              input.topics.topics.flatMap((topic) =>
+                topic.domains.map((domain) => `/${domain}/topics/`),
+              ),
+            ),
+            ...input.topics.topics.flatMap((topic) =>
+              Array.from(
+                { length: Math.ceil(topic.currentMemberInsightIds.length / 5) },
+                (_, index) =>
+                  index === 0
+                    ? `/topics/${topic.id}/`
+                    : `/topics/${topic.id}/page/${index + 1}/`,
+              ),
+            ),
+          ]
+        : []),
     ].sort();
     const logo = input.assets.get(input.home.masthead.logoAssetPath);
     if (!logo) throw new Error("validated masthead logo is unavailable");

@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 
+import { createPublicationInputRepository } from "../../src/content/adapters/publication-input/publication-input-repository";
+import { validatePublicationInput } from "../../src/content/adapters/publication-input/validate-publication-input";
 import { createSiteContentRepository } from "../../src/content/composition-root";
 import { writePublicationFixture } from "../support/publication-fixture";
 
@@ -94,5 +96,98 @@ describe("SiteContentRepository", () => {
       domain: "software-engineering",
       domains: ["software-engineering", "model-research"],
     });
+  });
+
+  it("exposes topic-first domain indexes and the latest confirmed judgment", async () => {
+    const fixture = await writePublicationFixture();
+    const repository = await createSiteContentRepository(fixture.root);
+
+    const overviews = await repository.listTopicOverviews();
+    const pages = await repository.listTopicPages();
+
+    expect(overviews.map((overview) => overview.domain.id)).toEqual([
+      "software-engineering",
+      "model-research",
+    ]);
+    expect(overviews[0]).toMatchObject({
+      url: "/software-engineering/topics/",
+      topics: [
+        {
+          id: fixture.topicId,
+          url: `/topics/${fixture.topicId}/`,
+          version: 3,
+          memberCount: 2,
+        },
+      ],
+      tags: [{ type: "problem", name: "reliability" }],
+    });
+    expect(pages[0]).toMatchObject({
+      id: fixture.topicId,
+      topicPage: 1,
+      url: `/topics/${fixture.topicId}/`,
+      currentMemberCount: 2,
+      latestConfirmedJudgment: {
+        statement: "可靠 Agent 交付正在从生成能力转向可验证的变更闭环。",
+        topicVersion: 2,
+        matchingRulesVersion: "same-type-or-cross-type-and-v1",
+      },
+    });
+  });
+
+  it("omits the entire judgment block when no confirmed judgment was published", async () => {
+    const fixture = await writePublicationFixture({ topicJudgment: "none" });
+    const repository = await createSiteContentRepository(fixture.root);
+
+    const page = (await repository.listTopicPages()).find(
+      (candidate) => candidate.id === fixture.topicId,
+    );
+
+    expect(page).toBeDefined();
+    expect(page).not.toHaveProperty("latestConfirmedJudgment");
+  });
+
+  it("paginates current topic members by five with stable topic_page routes", async () => {
+    const fixture = await writePublicationFixture();
+    const input = await validatePublicationInput(fixture.root);
+    if (!input.topics) throw new Error("expected topic fixture");
+    const base = input.insights[0];
+    if (!base) throw new Error("expected insight fixture");
+    const insights = [
+      ...input.insights,
+      ...Array.from({ length: 4 }, (_, index) => ({
+        ...base,
+        id: `insight-${String(index + 3).padStart(24, "0")}`,
+        sourceId: `source-${String(index + 3).padStart(24, "0")}`,
+        title: `Topic member ${index + 3}`,
+        contentDate: {
+          ...base.contentDate,
+          value: `2026-08-${String(16 - index).padStart(2, "0")}T08:00:00+00:00`,
+        },
+      })),
+    ];
+    const topic = input.topics.topics[0];
+    if (!topic) throw new Error("expected topic definition");
+    const repository = createPublicationInputRepository({
+      ...input,
+      insights,
+      topics: {
+        ...input.topics,
+        topics: [
+          {
+            ...topic,
+            currentMemberInsightIds: insights.map((insight) => insight.id),
+          },
+        ],
+      },
+    });
+
+    const pages = await repository.listTopicPages();
+
+    expect(
+      pages.map((page) => [page.topicPage, page.url, page.relatedInsights.length]),
+    ).toEqual([
+      [1, `/topics/${topic.id}/`, 5],
+      [2, `/topics/${topic.id}/page/2/`, 1],
+    ]);
   });
 });

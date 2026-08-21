@@ -1,0 +1,113 @@
+---
+import EditorialHeader from "../../components/EditorialHeader.astro";
+import { createSiteContentRepository } from "../../content/composition-root";
+import type { TopicOverviewPage } from "../../content/model/topic-page";
+import SiteLayout from "../../layouts/SiteLayout.astro";
+
+export async function getStaticPaths() {
+  const repository = await createSiteContentRepository();
+  const overviews = await repository.listTopicOverviews();
+  return overviews.map((overview) => ({
+    params: { domain: overview.domain.id },
+    props: { overview },
+  }));
+}
+
+interface Props {
+  overview: TopicOverviewPage;
+}
+
+const { overview } = Astro.props;
+---
+
+<SiteLayout title={`主题与标签 · ${overview.domain.name}`} canonicalPath={overview.url}>
+  <EditorialHeader
+    brand={overview.brand}
+    homeUrl={overview.domain.url}
+    topicsUrl={overview.url}
+    active="topics"
+  />
+  <main class="topic-overview-page">
+    <header class="topic-overview-heading">
+      <div>
+        <p class="section-label">FACETED INDEX / 双层导航</p>
+        <h1>主题与标签</h1>
+      </div>
+      <div>
+        <p class="section-label">整页阅读领域</p>
+        <nav class="domain-switch" aria-label="选择整页阅读领域">
+          {
+            overview.availableDomains.map((domain) => (
+              <a
+                href={domain.url}
+                aria-current={domain.id === overview.domain.id ? "page" : undefined}
+              >
+                {domain.name}
+              </a>
+            ))
+          }
+        </nav>
+      </div>
+    </header>
+    <div class="topic-index-layout">
+      <section class="topic-directory" aria-labelledby="topic-directory-title">
+        <header>
+          <span>01</span>
+          <div>
+            <h2 id="topic-directory-title">当前主题</h2>
+            <p>{overview.domain.name} · {overview.topics.length} 个稳定主题</p>
+          </div>
+        </header>
+        <ol>
+          {
+            overview.topics.map((topic, index) => (
+              <li>
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <article>
+                  <p>
+                    VERSION {topic.version} · 更新于 {topic.latestMemberDate.slice(0, 10)}
+                  </p>
+                  <h3>
+                    <a href={topic.url}>{topic.name}</a>
+                  </h3>
+                  <p>{topic.scope}</p>
+                  <ul>
+                    {topic.tags.map((tag) => (
+                      <li>
+                        <a href={tag.url}>{tag.name}</a>
+                      </li>
+                    ))}
+                  </ul>
+                </article>
+                <strong>
+                  {topic.memberCount}
+                  <small>篇</small>
+                </strong>
+              </li>
+            ))
+          }
+        </ol>
+      </section>
+      <aside class="topic-tag-index" aria-labelledby="topic-tag-title">
+        <header>
+          <span>02</span>
+          <div>
+            <h2 id="topic-tag-title">标签索引</h2>
+            <p>标签解释主题范围，不组成任意筛选表达式。</p>
+          </div>
+        </header>
+        <ol>
+          {
+            overview.tags.map((tag, index) => (
+              <li id={tag.anchorId}>
+                <span>{String(index + 1).padStart(2, "0")}</span>
+                <a href={`${overview.url}#${tag.anchorId}`}>{tag.name}</a>
+                <small>{tag.type}</small>
+              </li>
+            ))
+          }
+        </ol>
+      </aside>
+    </div>
+  </main>
+</SiteLayout>

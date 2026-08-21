@@ -1,0 +1,139 @@
+---
+import { topicRoute } from "../content/model/site-routes";
+import type { TopicPage } from "../content/model/topic-page";
+import SiteLayout from "../layouts/SiteLayout.astro";
+import EditorialHeader from "./EditorialHeader.astro";
+
+interface Props {
+  page: TopicPage;
+}
+
+const { page } = Astro.props;
+const displayDate = (value: string): string => value.slice(0, 10).replaceAll("-", ".");
+const firstRelated = (page.topicPage - 1) * 5 + 1;
+const lastRelated = firstRelated + page.relatedInsights.length - 1;
+---
+
+<SiteLayout title={`${page.name} · DEVHOT`} canonicalPath={page.url}>
+  <EditorialHeader
+    brand={page.brand}
+    homeUrl={page.homeUrl}
+    topicsUrl={page.topicsUrl}
+    active="topics"
+  />
+  <main class="topic-detail-page">
+    <header class="topic-identity">
+      <div>
+        <p class="section-label">洞察主题 · VERSION {page.version}</p>
+        <h1>{page.name}</h1>
+        <p class="topic-scope-copy">{page.scope}</p>
+      </div>
+      <dl class="topic-definition">
+        <div>
+          <dt>领域</dt>
+          <dd>{page.domains.map((domain) => domain.name).join(" / ")}</dd>
+        </div>
+        <div>
+          <dt>组成标签</dt>
+          <dd>
+            {
+              page.tags.map((tag) => (
+                <a href={tag.url}>
+                  {tag.type}:{tag.name}
+                </a>
+              ))
+            }
+          </dd>
+        </div>
+      </dl>
+    </header>
+
+    {
+      page.latestConfirmedJudgment ? (
+        <article class="topic-judgment" aria-labelledby="topic-judgment-title">
+          <header>
+            <p class="section-label">LATEST CONFIRMED</p>
+            <h2 id="topic-judgment-title">主题判断</h2>
+            <time datetime={page.latestConfirmedJudgment.confirmedAt}>
+              确认于 {displayDate(page.latestConfirmedJudgment.confirmedAt)}
+            </time>
+          </header>
+          <div>
+            <p class="topic-judgment-statement">
+              {page.latestConfirmedJudgment.statement}
+            </p>
+            <dl>
+              <div>
+                <dt>本次判断证据</dt>
+                <dd>
+                  {page.latestConfirmedJudgment.evidence.articleCount} 条洞察 ·
+                  {page.latestConfirmedJudgment.evidence.sourceCount} 个来源 ·
+                  {page.latestConfirmedJudgment.evidence.dateFrom}—
+                  {page.latestConfirmedJudgment.evidence.dateTo}
+                </dd>
+              </div>
+              <div>
+                <dt>成立边界</dt>
+                <dd>{page.latestConfirmedJudgment.boundary}</dd>
+              </div>
+            </dl>
+          </div>
+        </article>
+      ) : null
+    }
+
+    <section class="topic-related" aria-labelledby="topic-related-title">
+      <header>
+        <div>
+          <p class="section-label">CURRENT MEMBERS</p>
+          <h2 id="topic-related-title">相关洞察</h2>
+        </div>
+        <p>当前主题共 {page.currentMemberCount} 篇</p>
+      </header>
+      <ol class="topic-related-list" start={firstRelated}>
+        {
+          page.relatedInsights.map((insight) => (
+            <li>
+              <a href={insight.url}>
+                <span>
+                  {String(firstRelated + page.relatedInsights.indexOf(insight)).padStart(
+                    2,
+                    "0",
+                  )}
+                </span>
+                <article>
+                  <p>
+                    {insight.sourceName} · {displayDate(insight.contentDate.value)}
+                  </p>
+                  <h3>{insight.title}</h3>
+                  <p>{insight.summary}</p>
+                </article>
+              </a>
+            </li>
+          ))
+        }
+      </ol>
+      {
+        page.pageCount > 1 ? (
+          <nav class="topic-pagination" aria-label="相关洞察分页">
+            <p>
+              当前显示 {firstRelated}–{lastRelated} / 共 {page.currentMemberCount} 篇
+            </p>
+            <div>
+              {Array.from({ length: page.pageCount }, (_, index) => index + 1).map(
+                (topicPage) => (
+                  <a
+                    href={topicRoute(page.id, topicPage)}
+                    aria-current={topicPage === page.topicPage ? "page" : undefined}
+                  >
+                    {String(topicPage).padStart(2, "0")}
+                  </a>
+                ),
+              )}
+            </div>
+          </nav>
+        ) : null
+      }
+    </section>
+  </main>
+</SiteLayout>

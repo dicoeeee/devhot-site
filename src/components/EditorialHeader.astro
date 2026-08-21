@@ -1,0 +1,31 @@
+---
+import type { HomePage } from "../content/model/home-page";
+
+interface Props {
+  brand: HomePage["brand"];
+  homeUrl: string;
+  topicsUrl: string;
+  active: "home" | "topics";
+}
+
+const { brand, homeUrl, topicsUrl, active } = Astro.props;
+---
+
+<header class="editorial-bar">
+  <a class="brand-lockup" href={homeUrl} aria-label="DEVHOT 首页">
+    <img class="brand-logo" src={brand.logoUrl} alt="CIMC" width="64" height="64" />
+    <span class="brand-type">
+      <strong>{brand.publication}</strong>
+      <span>{brand.journal}</span>
+    </span>
+  </a>
+  <nav class="reading-entry-nav" aria-label="阅读入口">
+    <a data-reading-entry="timeline" aria-disabled="true">时间线</a>
+    <a
+      data-reading-entry="topics"
+      href={topicsUrl}
+      aria-current={active === "topics" ? "page" : undefined}>主题</a
+    >
+  </nav>
+  <p class="attribution">{brand.attribution}</p>
+</header>

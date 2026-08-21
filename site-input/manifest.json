@@ -1,9 +1,9 @@
 {
   "schemaVersion": 2,
-  "publicationId": "candidate-64acec1408a2113a73a8a650",
+  "publicationId": "candidate-b98c5795d02939c5ca4a7d91",
   "candidate": {
     "baselineSha": "0000000000000000000000000000000000000000",
-    "inputIdentity": "64acec1408a2113a73a8a65012e2ca45eb48846766845450bb1e2c4d2c3447ac"
+    "inputIdentity": "b98c5795d02939c5ca4a7d910535e43ec6004d03189a345847744b4109107356"
   },
   "builderCompatibility": {
     "min": "0.2.0",
@@ -18,7 +18,8 @@
     "sources": [
       "data/sources/source-59498e27cf7aac1a9e4f9a76.json",
       "data/sources/source-000000000000000000000002.json"
-    ]
+    ],
+    "topics": "data/topics.json"
   },
   "files": [
     {
@@ -45,6 +46,11 @@
       "path": "data/sources/source-000000000000000000000002.json",
       "mediaType": "application/json",
       "sha256": "dbf8300eeef57f3779762eb16499950cd77a06f802757ace904bb3ccaa7653c2"
+    },
+    {
+      "path": "data/topics.json",
+      "mediaType": "application/json",
+      "sha256": "5c9e0cdf4b9b5b9ced99ca092e09744a8b978cfa815ea820ec2aa4c2fa3b4771"
     },
     {
       "path": "assets/sha256/73bc08f1a558271ed021a4f51fcc4a07d2850deea7cb592282ae0f9d5a110c89.png",

@@ -9,6 +9,8 @@ import {
   insightRoute,
   mediaAssetRoute,
   sourceArchiveRoute,
+  topicOverviewRoute,
+  topicRoute,
 } from "../src/content/model/site-routes";
 
 const execFileAsync = promisify(execFile);
@@ -60,6 +62,21 @@ export const copyDeclaredAssets = async ({
         : input.home.domains.map((home) => home.domain.url)),
       ...input.insights.map((insight) => insightRoute(insight.id)),
       ...input.sources.map((source) => sourceArchiveRoute(source.id)),
+      ...(input.topics
+        ? [
+            ...new Set(
+              input.topics.topics.flatMap((topic) =>
+                topic.domains.map((domain) => topicOverviewRoute(domain)),
+              ),
+            ),
+            ...input.topics.topics.flatMap((topic) =>
+              Array.from(
+                { length: Math.ceil(topic.currentMemberInsightIds.length / 5) },
+                (_, index) => topicRoute(topic.id, index + 1),
+              ),
+            ),
+          ]
+        : []),
     ].sort(),
     assets: assets.map((asset) => ({
       url: mediaAssetRoute(asset.sha256),

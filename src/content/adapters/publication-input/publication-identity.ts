@@ -6,6 +6,7 @@ interface PublicationIdentityFields {
     readonly home: string;
     readonly insights: readonly string[];
     readonly sources: readonly string[];
+    readonly topics?: string;
   };
   readonly files: readonly {
     readonly path: string;

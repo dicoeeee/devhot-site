@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "matchingRulesVersion": "same-type-or-cross-type-and-v1",
+  "topics": [
+    {
+      "id": "reliable-agent-delivery",
+      "version": 1,
+      "name": "可靠 Agent 交付",
+      "scope": "Agent 变更如何绑定冻结输入、独立验证与最终准入。",
+      "domains": ["software-engineering"],
+      "tagFilters": [
+        { "tagType": "problem", "anyOf": ["reliability"] }
+      ],
+      "currentMemberInsightIds": [
+        "insight-59498e27cf7aac1a9e4f9a76"
+      ],
+      "latestConfirmedJudgment": {
+        "id": "reliable-agent-delivery-judgment-1",
+        "sequence": 1,
+        "topicVersion": 1,
+        "matchingRulesVersion": "same-type-or-cross-type-and-v1",
+        "statement": "可靠 Agent 交付正在从生成能力转向可验证的变更闭环。",
+        "boundary": "证据来自具备独立检查和明确最终准入权的工程系统。",
+        "confirmedAt": "2026-08-18T09:30:00+08:00",
+        "evidence": {
+          "articleCount": 4,
+          "sourceCount": 2,
+          "dateFrom": "2026-07-28",
+          "dateTo": "2026-08-12"
+        }
+      }
+    },
+    {
+      "id": "evaluation-boundaries",
+      "version": 1,
+      "name": "评估边界",
+      "scope": "评估如何绑定可复核输入和明确适用范围。",
+      "domains": ["model-research"],
+      "tagFilters": [
+        { "tagType": "problem", "anyOf": ["evaluation"] }
+      ],
+      "currentMemberInsightIds": [
+        "insight-000000000000000000000002"
+      ]
+    }
+  ]
+}

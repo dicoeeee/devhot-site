@@ -52,14 +52,14 @@ describe("static editorial domain home", () => {
     expect(software).toContain("不可变输入让自动化结果可重放。");
     expect(software).toContain('href="/insights/insight-59498e27cf7aac1a9e4f9a76/"');
 
-    const readingEntries = [
-      ...software.matchAll(/<a\b[^>]*data-reading-entry="(timeline|topics)"[^>]*>/g),
-    ];
-    expect(readingEntries.map((entry) => entry[1])).toEqual(["timeline", "topics"]);
-    for (const [entry] of readingEntries) {
-      expect(entry).toContain('aria-disabled="true"');
-      expect(entry).not.toMatch(/\shref=/);
-    }
+    const timelineEntry = software.match(
+      /<a\b[^>]*data-reading-entry="timeline"[^>]*>/,
+    )?.[0];
+    const topicsEntry = software.match(/<a\b[^>]*data-reading-entry="topics"[^>]*>/)?.[0];
+    expect(timelineEntry).toContain('aria-disabled="true"');
+    expect(timelineEntry).not.toMatch(/\shref=/);
+    expect(topicsEntry).toContain('href="/software-engineering/topics/"');
+    expect(topicsEntry).not.toContain('aria-disabled="true"');
     expect(software).toContain("时间线");
     expect(software).toContain("主题");
     expect(software).not.toMatch(/(?:日报|周报|报告|\/reports?\/)/);

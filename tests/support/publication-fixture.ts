@@ -21,6 +21,8 @@ interface PublicationFixtureOptions {
   readonly recentInsightSelection?:
     "complete" | "cross-domain" | "duplicate" | "empty" | "overflow";
   readonly staleWeeklyRange?: boolean;
+  readonly topicJudgment?: "confirmed" | "none";
+  readonly topicRuleViolation?: "duplicate-type" | "nested" | "not" | "member-mismatch";
   readonly unreferencedAsset?: boolean;
   readonly unreferencedJson?: boolean;
   readonly weeklySourceCounts?: "duplicate" | "mismatch";
@@ -208,7 +210,10 @@ export const writePublicationFixture = async (
     },
     keyInterpretation: "关键变化是把输出绑定到可审计输入。",
     domainImplications: "工程自动化需要可重放边界。",
-    tags: [{ type: "domain", name: "software-engineering" }],
+    tags: [
+      { type: "domain", name: "software-engineering" },
+      { type: "problem", name: "reliability" },
+    ],
     citations: [
       {
         sourceId,
@@ -238,6 +243,11 @@ export const writePublicationFixture = async (
     domain: "model-research",
     title: "Reliable model architecture 2",
     summary: "冻结输入让模型评估可复核。",
+    tags: [
+      { type: "domain", name: "model-research" },
+      { type: "problem", name: "reliability" },
+      { type: "method", name: "evaluation" },
+    ],
     sourceUrl: `/sources/${modelSourceId}/`,
     officialUrl: "https://example.com/reliable-model-2",
     citations: [
@@ -269,12 +279,80 @@ export const writePublicationFixture = async (
   const extraSourcePath = `data/sources/${extraSourceId}.json`;
   const unreferencedJson = JSON.stringify({ private: "draft" });
   const unreferencedJsonPath = "data/private-draft.json";
+  const topicId = "reliable-agent-delivery";
+  const topicPath = "data/topics.json";
+  const topicConditions =
+    options.topicRuleViolation === "duplicate-type"
+      ? [
+          { tagType: "problem", anyOf: ["reliability"] },
+          { tagType: "problem", anyOf: ["security"] },
+        ]
+      : options.topicRuleViolation === "nested"
+        ? [
+            {
+              tagType: "problem",
+              anyOf: ["reliability"],
+              nested: { tagType: "method", anyOf: ["evaluation"] },
+            },
+          ]
+        : options.topicRuleViolation === "not"
+          ? [{ tagType: "problem", anyOf: ["reliability"], not: ["security"] }]
+          : [{ tagType: "problem", anyOf: ["reliability"] }];
+  const topics = JSON.stringify({
+    schemaVersion: 1,
+    matchingRulesVersion: "same-type-or-cross-type-and-v1",
+    topics: [
+      {
+        id: topicId,
+        version: 3,
+        name: "可靠 Agent 交付",
+        scope: "Agent 变更如何绑定冻结输入、独立验证与最终准入。",
+        domains: ["software-engineering", "model-research"],
+        tagFilters: topicConditions,
+        currentMemberInsightIds:
+          options.topicRuleViolation === "member-mismatch"
+            ? [insightId]
+            : [insightId, modelInsightId],
+        ...(options.topicJudgment === "none"
+          ? {}
+          : {
+              latestConfirmedJudgment: {
+                id: "topic-judgment-reliable-agent-delivery-1",
+                sequence: 1,
+                topicVersion: 2,
+                matchingRulesVersion: "same-type-or-cross-type-and-v1",
+                statement: "可靠 Agent 交付正在从生成能力转向可验证的变更闭环。",
+                boundary: "证据来自具备独立检查和明确最终准入权的工程系统。",
+                confirmedAt: "2026-08-18T09:30:00+08:00",
+                evidence: {
+                  articleCount: 4,
+                  sourceCount: 2,
+                  dateFrom: "2026-07-28",
+                  dateTo: "2026-08-12",
+                },
+              },
+            }),
+      },
+      {
+        id: "evaluation-boundaries",
+        version: 1,
+        name: "评估边界",
+        scope: "评估如何绑定可复核输入和明确适用范围。",
+        domains: ["model-research"],
+        tagFilters: [{ tagType: "method", anyOf: ["evaluation"] }],
+        currentMemberInsightIds: [modelInsightId],
+      },
+    ],
+  });
 
   await mkdir(join(root, "data"), { recursive: true });
   await mkdir(join(root, "assets", "sha256"), { recursive: true });
   await writeFile(join(root, "data", "home.json"), home);
   await mkdir(join(root, "data", "insights"), { recursive: true });
   await mkdir(join(root, "data", "sources"), { recursive: true });
+  if (!options.legacyHomeContract) {
+    await writeFile(join(root, topicPath), topics);
+  }
   await writeFile(join(root, insightPath), insight);
   await writeFile(join(root, modelInsightPath), modelInsight);
   await writeFile(join(root, sourcePath), source);
@@ -300,6 +378,7 @@ export const writePublicationFixture = async (
       modelSourcePath,
       ...(options.extraSourceReferencingInsight ? [extraSourcePath] : []),
     ],
+    ...(options.legacyHomeContract ? {} : { topics: topicPath }),
   };
   const files = [
     {
@@ -327,6 +406,15 @@ export const writePublicationFixture = async (
       mediaType: "application/json" as const,
       sha256: sha256(modelSource),
     },
+    ...(options.legacyHomeContract
+      ? []
+      : [
+          {
+            path: topicPath,
+            mediaType: "application/json" as const,
+            sha256: sha256(topics),
+          },
+        ]),
     ...(options.extraSourceReferencingInsight
       ? [
           {
@@ -385,6 +473,7 @@ export const writePublicationFixture = async (
     logoSha256,
     insightId,
     sourceId,
+    topicId,
     inputIdentity,
     publicationId,
   };

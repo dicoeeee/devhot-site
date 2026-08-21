@@ -127,6 +127,40 @@ export interface SourceArchivePublicationInput {
   readonly insightUrl: string;
 }
 
+export type TopicTagType = "domain" | "lifecycle" | "problem" | "method";
+
+export interface TopicCatalogPublicationInput {
+  readonly schemaVersion: 1;
+  readonly matchingRulesVersion: "same-type-or-cross-type-and-v1";
+  readonly topics: readonly {
+    readonly id: string;
+    readonly version: number;
+    readonly name: string;
+    readonly scope: string;
+    readonly domains: readonly EditorialDomainId[];
+    readonly tagFilters: readonly {
+      readonly tagType: TopicTagType;
+      readonly anyOf: readonly string[];
+    }[];
+    readonly currentMemberInsightIds: readonly string[];
+    readonly latestConfirmedJudgment?: {
+      readonly id: string;
+      readonly sequence: number;
+      readonly topicVersion: number;
+      readonly matchingRulesVersion: "same-type-or-cross-type-and-v1";
+      readonly statement: string;
+      readonly boundary: string;
+      readonly confirmedAt: string;
+      readonly evidence: {
+        readonly articleCount: number;
+        readonly sourceCount: number;
+        readonly dateFrom: string;
+        readonly dateTo: string;
+      };
+    };
+  }[];
+}
+
 export interface VerifiedPublicationInput {
   readonly root: string;
   readonly publicationId: string;
@@ -137,5 +171,6 @@ export interface VerifiedPublicationInput {
   readonly home: HomePublicationInput;
   readonly insights: readonly InsightPublicationInput[];
   readonly sources: readonly SourceArchivePublicationInput[];
+  readonly topics?: TopicCatalogPublicationInput;
   readonly assets: ReadonlyMap<string, VerifiedAsset>;
 }
