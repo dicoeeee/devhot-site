@@ -30,6 +30,21 @@ describe("validatePublicationInput", () => {
       ],
     });
     expect(verified.assets.get(fixture.logoPath)?.sha256).toBe(fixture.logoSha256);
+    expect(verified.topics).toMatchObject({
+      schemaVersion: 1,
+      matchingRulesVersion: "same-type-or-cross-type-and-v1",
+      topics: [
+        {
+          id: fixture.topicId,
+          version: 3,
+          latestConfirmedJudgment: {
+            topicVersion: 3,
+            matchingRulesVersion: "same-type-or-cross-type-and-v1",
+          },
+        },
+        { id: "evaluation-boundaries", version: 1 },
+      ],
+    });
   });
 
   it("continues to accept the legacy extensible-domain home contract", async () => {
@@ -44,6 +59,34 @@ describe("validatePublicationInput", () => {
       schemaVersion: 1,
       domain: { id: "operations", url: "/operations/" },
     });
+  });
+
+  it("continues to accept editorial input before the optional topic contract", async () => {
+    const fixture = await writePublicationFixture({ omitTopics: true });
+
+    const verified = await validatePublicationInput(fixture.root);
+
+    expect(verified.home.schemaVersion).toBe(2);
+    expect(verified.topics).toBeUndefined();
+  });
+
+  it("preserves a versioned topic when its current member set is empty", async () => {
+    const fixture = await writePublicationFixture({ emptyTopic: true });
+
+    const verified = await validatePublicationInput(fixture.root);
+
+    expect(verified.topics?.topics[0]).toMatchObject({
+      id: fixture.topicId,
+      currentMemberInsightIds: [],
+    });
+  });
+
+  it("rejects a judgment bound to a different topic definition version", async () => {
+    const fixture = await writePublicationFixture({ topicJudgmentVersion: 2 });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "invalid confirmed topic judgment",
+    );
   });
 
   it("accepts one insight on both domain homes with one shared identity", async () => {
@@ -182,6 +225,27 @@ describe("validatePublicationInput", () => {
 
     await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
       "manifest JSON files must exactly match typed entrypoints",
+    );
+  });
+
+  it.each(["duplicate-type", "nested", "not"] as const)(
+    "rejects a topic rule outside flat same-type OR / cross-type AND semantics: %s",
+    async (topicRuleViolation) => {
+      const fixture = await writePublicationFixture({ topicRuleViolation });
+
+      await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+        "invalid topic catalog input",
+      );
+    },
+  );
+
+  it("rejects a topic member projection that does not match its frozen tag filters", async () => {
+    const fixture = await writePublicationFixture({
+      topicRuleViolation: "member-mismatch",
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "topic members do not match current insight tags",
     );
   });
 

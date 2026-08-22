@@ -1,0 +1,20 @@
+---
+import TopicDetail from "../../components/TopicDetail.astro";
+import { createSiteContentRepository } from "../../content/composition-root";
+import type { TopicPage } from "../../content/model/topic-page";
+
+export async function getStaticPaths() {
+  const pages = await (await createSiteContentRepository()).listTopicPages();
+  return pages
+    .filter((page) => page.topicPage === 1)
+    .map((page) => ({ params: { topic: page.id }, props: { page } }));
+}
+
+interface Props {
+  page: TopicPage;
+}
+
+const { page } = Astro.props;
+---
+
+<TopicDetail page={page} />

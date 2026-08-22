@@ -52,14 +52,14 @@ describe("static editorial domain home", () => {
     expect(software).toContain("不可变输入让自动化结果可重放。");
     expect(software).toContain('href="/insights/insight-59498e27cf7aac1a9e4f9a76/"');
 
-    const readingEntries = [
-      ...software.matchAll(/<a\b[^>]*data-reading-entry="(timeline|topics)"[^>]*>/g),
-    ];
-    expect(readingEntries.map((entry) => entry[1])).toEqual(["timeline", "topics"]);
-    for (const [entry] of readingEntries) {
-      expect(entry).toContain('aria-disabled="true"');
-      expect(entry).not.toMatch(/\shref=/);
-    }
+    const timelineEntry = software.match(
+      /<a\b[^>]*data-reading-entry="timeline"[^>]*>/,
+    )?.[0];
+    const topicsEntry = software.match(/<a\b[^>]*data-reading-entry="topics"[^>]*>/)?.[0];
+    expect(timelineEntry).toContain('aria-disabled="true"');
+    expect(timelineEntry).not.toMatch(/\shref=/);
+    expect(topicsEntry).toContain('href="/software-engineering/topics/"');
+    expect(topicsEntry).not.toContain('aria-disabled="true"');
     expect(software).toContain("时间线");
     expect(software).toContain("主题");
     expect(software).not.toMatch(/(?:日报|周报|报告|\/reports?\/)/);
@@ -83,6 +83,21 @@ describe("static editorial domain home", () => {
 
     const root = await readFile(join(buildRoot, "dist", "index.html"), "utf8");
     expect(root).toContain("url=/operations/");
+  });
+
+  it("keeps the topic entry disabled for a valid editorial input without topics", async () => {
+    const fixture = await writePublicationFixture({ omitTopics: true });
+    const buildRoot = await prepareStaticBuild(fixture.root);
+
+    await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
+
+    const software = await readFile(
+      join(buildRoot, "dist", "software-engineering", "index.html"),
+      "utf8",
+    );
+    const topicsEntry = software.match(/<a\b[^>]*data-reading-entry="topics"[^>]*>/)?.[0];
+    expect(topicsEntry).toContain('aria-disabled="true"');
+    expect(topicsEntry).not.toMatch(/\shref=/);
   });
 
   it("blocks page generation when the editorial home is incomplete", async () => {

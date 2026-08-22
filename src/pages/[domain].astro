@@ -1,6 +1,7 @@
 ---
 import { createSiteContentRepository } from "../content/composition-root";
 import type { HomePage } from "../content/model/home-page";
+import EditorialHeader from "../components/EditorialHeader.astro";
 import SiteLayout from "../layouts/SiteLayout.astro";
 
 export async function getStaticPaths() {
@@ -30,26 +31,12 @@ const displayDate = (value: string): string =>
   title={`${home.brand.publication} · ${home.domain.name}`}
   canonicalPath={home.domain.url}
 >
-  <header class="editorial-bar">
-    <a class="brand-lockup" href={home.domain.url} aria-label="DEVHOT 首页">
-      <img
-        class="brand-logo"
-        src={home.brand.logoUrl}
-        alt="CIMC"
-        width="64"
-        height="64"
-      />
-      <span class="brand-type">
-        <strong>{home.brand.publication}</strong>
-        <span>{home.brand.journal}</span>
-      </span>
-    </a>
-    <nav class="reading-entry-nav" aria-label="阅读入口">
-      <a data-reading-entry="timeline" aria-disabled="true">时间线</a>
-      <a data-reading-entry="topics" aria-disabled="true">主题</a>
-    </nav>
-    <p class="attribution">{home.brand.attribution}</p>
-  </header>
+  <EditorialHeader
+    brand={home.brand}
+    homeUrl={home.domain.url}
+    topicsUrl={home.topicsUrl}
+    active="home"
+  />
 
   <main>
     <section class="domain-state" data-domain-status={home.domain.id}>

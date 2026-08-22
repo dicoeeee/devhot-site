@@ -14,6 +14,7 @@ import type {
   HomePublicationInput,
   InsightPublicationInput,
   SourceArchivePublicationInput,
+  TopicCatalogPublicationInput,
   VerifiedAsset,
   VerifiedPublicationInput,
 } from "./publication-input";
@@ -39,11 +40,12 @@ interface PublicationManifest {
     readonly home: string;
     readonly insights: readonly string[];
     readonly sources: readonly string[];
+    readonly topics?: string;
   };
   readonly files: readonly ManifestFile[];
 }
 
-const BUILDER_VERSION = "0.2.0";
+const BUILDER_VERSION = "0.3.0";
 const contractsRoot = join(process.cwd(), "contracts");
 
 const readJson = async (path: string): Promise<unknown> =>
@@ -114,11 +116,23 @@ const assertUnique = (values: readonly string[], label: string): void => {
   }
 };
 
+const matchesTopic = (
+  insight: InsightPublicationInput,
+  topic: TopicCatalogPublicationInput["topics"][number],
+): boolean => {
+  const tags = new Set(insight.tags.map((tag) => `${tag.type}:${tag.name}`));
+  return topic.tagFilters.every((filter) =>
+    filter.anyOf.some((name) => tags.has(`${filter.tagType}:${name}`)),
+  );
+};
+
 export const validatePublicationInput = async (
   inputRoot: string,
 ): Promise<VerifiedPublicationInput> => {
   const root = resolve(inputRoot);
   const ajv = new Ajv({ allErrors: true, strict: true });
+  ajv.addFormat("date", /^\d{4}-\d{2}-\d{2}$/);
+  ajv.addFormat("date-time", (value: string) => Number.isFinite(Date.parse(value)));
   const validateManifest = ajv.compile<PublicationManifest>(
     await loadSchema<PublicationManifest>("publication-manifest.schema.json"),
   );
@@ -130,6 +144,9 @@ export const validatePublicationInput = async (
   );
   const validateSource = ajv.compile<SourceArchivePublicationInput>(
     await loadSchema<SourceArchivePublicationInput>("source-archive.schema.json"),
+  );
+  const validateTopics = ajv.compile<TopicCatalogPublicationInput>(
+    await loadSchema<TopicCatalogPublicationInput>("topic-catalog.schema.json"),
   );
 
   const rawManifest = await readJson(join(root, "manifest.json"));
@@ -209,10 +226,14 @@ export const validatePublicationInput = async (
   for (const path of manifest.entrypoints.sources) {
     declaredJson(manifest, path, "source entrypoint");
   }
+  if (manifest.entrypoints.topics) {
+    declaredJson(manifest, manifest.entrypoints.topics, "topic entrypoint");
+  }
   const typedJsonPaths = [
     manifest.entrypoints.home,
     ...manifest.entrypoints.insights,
     ...manifest.entrypoints.sources,
+    ...(manifest.entrypoints.topics ? [manifest.entrypoints.topics] : []),
   ];
   assertUnique(typedJsonPaths, "typed JSON entrypoint");
   const declaredJsonPaths = manifest.files
@@ -239,6 +260,14 @@ export const validatePublicationInput = async (
       validatedJson(root, path, validateSource, `source input ${path}`),
     ),
   );
+  const topics = manifest.entrypoints.topics
+    ? await validatedJson(
+        root,
+        manifest.entrypoints.topics,
+        validateTopics,
+        "topic catalog input",
+      )
+    : undefined;
   assertUnique(
     insights.map((insight) => insight.id),
     "insight identity",
@@ -316,6 +345,46 @@ export const validatePublicationInput = async (
       }
     }
   }
+  if (topics) {
+    if (home.schemaVersion !== 2) {
+      throw new Error("topic catalog requires the editorial home contract");
+    }
+    assertUnique(
+      topics.topics.map((topic) => topic.id),
+      "topic identity",
+    );
+    const availableDomains = new Set(home.domains.map((item) => item.domain.id));
+    for (const topic of topics.topics) {
+      const tagTypes = topic.tagFilters.map((filter) => filter.tagType);
+      if (new Set(tagTypes).size !== tagTypes.length) {
+        throw new Error(
+          `invalid topic catalog input: duplicate tag type for ${topic.id}`,
+        );
+      }
+      if (topic.domains.some((domain) => !availableDomains.has(domain))) {
+        throw new Error(`topic references an unavailable editorial domain: ${topic.id}`);
+      }
+      const expectedMembers = insights
+        .filter((insight) => matchesTopic(insight, topic))
+        .map((insight) => insight.id)
+        .sort();
+      const declaredMembers = [...topic.currentMemberInsightIds].sort();
+      if (expectedMembers.join("\n") !== declaredMembers.join("\n")) {
+        throw new Error(`topic members do not match current insight tags: ${topic.id}`);
+      }
+      const judgment = topic.latestConfirmedJudgment;
+      if (judgment) {
+        if (
+          judgment.topicVersion !== topic.version ||
+          (judgment.sequence === 1 && judgment.evidence.articleCount < 4) ||
+          judgment.evidence.sourceCount < 2 ||
+          judgment.evidence.dateFrom > judgment.evidence.dateTo
+        ) {
+          throw new Error(`invalid confirmed topic judgment: ${topic.id}`);
+        }
+      }
+    }
+  }
   for (const insight of insights) {
     const source = sourcesById.get(insight.sourceId);
     if (
@@ -365,6 +434,7 @@ export const validatePublicationInput = async (
     home: Object.freeze(home),
     insights: Object.freeze(insights),
     sources: Object.freeze(sources),
+    ...(topics ? { topics: Object.freeze(topics) } : {}),
     assets,
   });
 };

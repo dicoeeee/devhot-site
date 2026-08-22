@@ -58,6 +58,10 @@
             "type": "string",
             "pattern": "^data/sources/[a-z0-9][a-z0-9-]*\\.json$"
           }
+        },
+        "topics": {
+          "type": "string",
+          "pattern": "^data/topics\\.json$"
         }
       }
     },
