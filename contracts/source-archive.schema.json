@@ -3,16 +3,7 @@
   "$id": "https://devhot.example/contracts/source-archive.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schemaVersion",
-    "id",
-    "insightId",
-    "source",
-    "title",
-    "officialUrl",
-    "contentDate",
-    "insightUrl"
-  ],
+  "required": ["schemaVersion", "id", "source", "title", "officialUrl", "contentDate"],
   "properties": {
     "schemaVersion": { "enum": [1, 2] },
     "id": { "type": "string", "pattern": "^source-[a-f0-9]{24}$" },
@@ -109,12 +100,33 @@
     {
       "if": { "properties": { "schemaVersion": { "const": 1 } } },
       "then": {
-        "required": ["body", "images"],
-        "properties": { "body": {}, "images": {}, "content": false, "archive": false }
+        "required": ["insightId", "insightUrl", "body", "images"],
+        "properties": {
+          "insightId": {},
+          "insightUrl": {},
+          "body": {},
+          "images": {},
+          "content": false,
+          "archive": false
+        }
       },
       "else": {
         "required": ["content", "archive"],
-        "properties": { "body": false, "images": false, "content": {}, "archive": {} }
+        "properties": { "body": false, "images": false, "content": {}, "archive": {} },
+        "oneOf": [
+          {
+            "properties": { "insightId": {}, "insightUrl": {} },
+            "required": ["insightId", "insightUrl"]
+          },
+          {
+            "not": {
+              "anyOf": [
+                { "properties": { "insightId": {} }, "required": ["insightId"] },
+                { "properties": { "insightUrl": {} }, "required": ["insightUrl"] }
+              ]
+            }
+          }
+        ]
       }
     }
   ]

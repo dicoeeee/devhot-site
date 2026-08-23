@@ -1,8 +1,8 @@
 export interface SourceArchivePage {
   readonly id: string;
   readonly url: string;
-  readonly insightId: string;
-  readonly insightUrl: string;
+  readonly insightId?: string;
+  readonly insightUrl?: string;
   readonly officialUrl: string;
   readonly source: { readonly id: string; readonly name: string };
   readonly title: string;

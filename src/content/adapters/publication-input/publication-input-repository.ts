@@ -8,25 +8,31 @@ import {
   topicTagAnchor,
 } from "../../model/site-routes";
 import type { SiteContentRepository } from "../../ports/site-content-repository";
-import type { EditorialDomainId, VerifiedPublicationInput } from "./publication-input";
+import type {
+  EditorialDomainId,
+  PublicRelationType,
+  VerifiedPublicationInput,
+} from "./publication-input";
 
 const readerRelationLabel = (
-  relationType: string,
+  relationType: PublicRelationType,
   direction: "undirected" | "outbound" | "inbound",
 ): string => {
   if (relationType === "depends_on") return direction === "inbound" ? "被依赖" : "依赖";
   if (relationType === "evolves_from")
     return direction === "inbound" ? "后续演进" : "演进自";
   if (relationType === "implements") return direction === "inbound" ? "由其实现" : "实现";
-  return (
-    {
-      same_object: "同一技术对象",
-      same_problem: "解决同一问题",
-      integrates_with: "集成协作",
-      alternative_to: "替代方案",
-      complements: "互为补充",
-    }[relationType] ?? relationType
-  );
+  const labels: Record<
+    Exclude<PublicRelationType, "depends_on" | "evolves_from" | "implements">,
+    string
+  > = {
+    same_object: "同一技术对象",
+    same_problem: "解决同一问题",
+    integrates_with: "集成协作",
+    alternative_to: "替代方案",
+    complements: "互为补充",
+  };
+  return labels[relationType];
 };
 
 export const createPublicationInputRepository = (
@@ -43,9 +49,26 @@ export const createPublicationInputRepository = (
     logoUrl: mediaAssetRoute(logo.sha256, logo.mediaType),
   } as const;
   const sourcesByInsightId = new Map(
-    input.sources.map((source) => [source.insightId, source]),
+    input.sources.flatMap((source) =>
+      source.insightId ? ([[source.insightId, source]] as const) : [],
+    ),
   );
   const insightsById = new Map(input.insights.map((insight) => [insight.id, insight]));
+  const sourcesById = new Map(input.sources.map((source) => [source.id, source]));
+  const relatedTarget = (target: { kind: "insight" | "source"; id: string }) => {
+    const item =
+      target.kind === "insight"
+        ? insightsById.get(target.id)
+        : sourcesById.get(target.id);
+    if (!item) throw new Error(`verified relation target is unavailable: ${target.id}`);
+    return {
+      targetId: item.id,
+      targetKind: target.kind,
+      url:
+        target.kind === "insight" ? insightRoute(item.id) : sourceArchiveRoute(item.id),
+      title: item.title,
+    } as const;
+  };
   const topicsForInsight = (insightId: string) =>
     (input.topics?.topics ?? [])
       .filter((topic) => topic.currentMemberInsightIds.includes(insightId))
@@ -158,15 +181,8 @@ export const createPublicationInputRepository = (
       })),
       relatedReading: {
         deterministic: (insight.relations?.deterministic ?? []).map((relation) => {
-          const target = insightsById.get(relation.targetInsightId);
-          if (!target)
-            throw new Error(
-              `verified relation target is unavailable: ${relation.targetInsightId}`,
-            );
           return {
-            targetId: target.id,
-            url: insightRoute(target.id),
-            title: target.title,
+            ...relatedTarget(relation.target),
             relationType: relation.relationType,
             relationLabel: readerRelationLabel(relation.relationType, relation.direction),
             direction: relation.direction,
@@ -174,15 +190,8 @@ export const createPublicationInputRepository = (
           };
         }),
         modelDerived: (insight.relations?.modelDerived ?? []).map((relation) => {
-          const target = insightsById.get(relation.targetInsightId);
-          if (!target)
-            throw new Error(
-              `verified relation target is unavailable: ${relation.targetInsightId}`,
-            );
           return {
-            targetId: target.id,
-            url: insightRoute(target.id),
-            title: target.title,
+            ...relatedTarget(relation.target),
             relationType: relation.relationType,
             relationLabel: readerRelationLabel(relation.relationType, relation.direction),
             direction: relation.direction,
@@ -364,8 +373,8 @@ export const createPublicationInputRepository = (
       return input.sources.map((source) => ({
         id: source.id,
         url: sourceArchiveRoute(source.id),
-        insightId: source.insightId,
-        insightUrl: source.insightUrl,
+        ...(source.insightId ? { insightId: source.insightId } : {}),
+        ...(source.insightUrl ? { insightUrl: source.insightUrl } : {}),
         officialUrl: source.officialUrl,
         source: { ...source.source },
         title: source.title,

@@ -16,6 +16,34 @@ describe("validatePublicationInput", () => {
     );
   });
 
+  it.each(["empty-blocks", "empty-evidence"] as const)(
+    "rejects an insight with an invalid mechanism evidence contract: %s",
+    async (invalidMechanismContract) => {
+      const fixture = await writePublicationFixture({
+        evidenceReadingContract: true,
+        invalidMechanismContract,
+      });
+
+      await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+        "invalid insight input",
+      );
+    },
+  );
+
+  it.each(["direction", "overflow", "unknown-type"] as const)(
+    "rejects an insight with an invalid related-reading contract: %s",
+    async (invalidRelationContract) => {
+      const fixture = await writePublicationFixture({
+        evidenceReadingContract: true,
+        invalidRelationContract,
+      });
+
+      await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+        "invalid insight input",
+      );
+    },
+  );
+
   it("returns a verified input for a complete, hash-bound publication", async () => {
     const fixture = await writePublicationFixture();
 

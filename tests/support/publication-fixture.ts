@@ -19,6 +19,8 @@ interface PublicationFixtureOptions {
   readonly insightDomainMembership?:
     "duplicate" | "empty" | "missing-primary" | "overflow" | "shared" | "unknown";
   readonly invalidWeeklyRange?: boolean;
+  readonly invalidMechanismContract?: "empty-blocks" | "empty-evidence";
+  readonly invalidRelationContract?: "direction" | "overflow" | "unknown-type";
   readonly legacyHomeContract?: boolean;
   readonly mermaidMechanismContract?: boolean;
   readonly missingWeeklyOverview?: boolean;
@@ -26,6 +28,7 @@ interface PublicationFixtureOptions {
   readonly recentInsightSelection?:
     "complete" | "cross-domain" | "duplicate" | "empty" | "overflow";
   readonly staleWeeklyRange?: boolean;
+  readonly sourceFallbackRelation?: boolean;
   readonly topicJudgment?: "confirmed" | "none";
   readonly topicJudgmentVersion?: number;
   readonly topicRuleViolation?: "duplicate-type" | "nested" | "not" | "member-mismatch";
@@ -52,6 +55,7 @@ export const writePublicationFixture = async (
   const sourceId = "source-59498e27cf7aac1a9e4f9a76";
   const modelInsightId = "insight-000000000000000000000002";
   const modelSourceId = "source-000000000000000000000002";
+  const fallbackSourceId = "source-000000000000000000000003";
   const insightDomains =
     options.insightDomainMembership === "empty"
       ? []
@@ -205,52 +209,58 @@ export const writePublicationFixture = async (
     summary: "不可变输入让自动化结果可重放。",
     mechanism: {
       status: "present",
-      blocks: [
-        {
-          kind: "text",
-          text: "先冻结输入，再执行显式校验。",
-          evidenceRefs: [
-            {
-              evidenceId: "evidence-1",
-              quote: "Reliable agents use immutable inputs",
-            },
-          ],
-        },
-        ...(options.evidenceReadingContract
-          ? [
+      blocks:
+        options.invalidMechanismContract === "empty-blocks"
+          ? []
+          : [
               {
-                kind: "source_image",
-                text: "冻结来源图展示输入先于校验进入流水线。",
-                assetPath: logoPath,
-                alt: "冻结输入架构图",
-                caption: "来源归档中的原始架构图",
-                evidenceRefs: [
-                  {
-                    evidenceId: "evidence-1",
-                    quote: "Reliable agents use immutable inputs",
-                  },
-                ],
+                kind: "text",
+                text: "先冻结输入，再执行显式校验。",
+                evidenceRefs:
+                  options.invalidMechanismContract === "empty-evidence"
+                    ? []
+                    : [
+                        {
+                          evidenceId: "evidence-1",
+                          quote: "Reliable agents use immutable inputs",
+                        },
+                      ],
               },
-            ]
-          : []),
-        ...(options.mermaidMechanismContract
-          ? [
-              {
-                kind: "technical_flow_mermaid",
-                text: "冻结的 Mermaid 技术流程图。",
-                assetPath: mermaidPath,
-                alt: "冻结后校验的技术流程",
-                caption: "由已冻结 Mermaid 输入确定性渲染",
-                evidenceRefs: [
-                  {
-                    evidenceId: "evidence-1",
-                    quote: "Reliable agents use immutable inputs",
-                  },
-                ],
-              },
-            ]
-          : []),
-      ],
+              ...(options.evidenceReadingContract
+                ? [
+                    {
+                      kind: "source_image",
+                      text: "冻结来源图展示输入先于校验进入流水线。",
+                      assetPath: logoPath,
+                      alt: "冻结输入架构图",
+                      caption: "来源归档中的原始架构图",
+                      evidenceRefs: [
+                        {
+                          evidenceId: "evidence-1",
+                          quote: "Reliable agents use immutable inputs",
+                        },
+                      ],
+                    },
+                  ]
+                : []),
+              ...(options.mermaidMechanismContract
+                ? [
+                    {
+                      kind: "technical_flow_mermaid",
+                      text: "冻结的 Mermaid 技术流程图。",
+                      assetPath: mermaidPath,
+                      alt: "冻结后校验的技术流程",
+                      caption: "由已冻结 Mermaid 输入确定性渲染",
+                      evidenceRefs: [
+                        {
+                          evidenceId: "evidence-1",
+                          quote: "Reliable agents use immutable inputs",
+                        },
+                      ],
+                    },
+                  ]
+                : []),
+            ],
     },
     keyInterpretation: "关键变化是把输出绑定到可审计输入。",
     domainImplications: "工程自动化需要可重放边界。",
@@ -268,17 +278,26 @@ export const writePublicationFixture = async (
     ...(options.evidenceReadingContract
       ? {
           relations: {
-            deterministic: [
-              {
-                targetInsightId: modelInsightId,
-                relationType: "same_object",
-                direction: "undirected",
+            deterministic: Array.from(
+              { length: options.invalidRelationContract === "overflow" ? 6 : 1 },
+              () => ({
+                target: options.sourceFallbackRelation
+                  ? { kind: "source", id: fallbackSourceId }
+                  : { kind: "insight", id: modelInsightId },
+                relationType:
+                  options.invalidRelationContract === "unknown-type"
+                    ? "generated_similarity"
+                    : "same_object",
+                direction:
+                  options.invalidRelationContract === "direction"
+                    ? "outbound"
+                    : "undirected",
                 basis: "共享同一经过验证的 repository identity。",
-              },
-            ],
+              }),
+            ),
             modelDerived: [
               {
-                targetInsightId: modelInsightId,
+                target: { kind: "insight", id: modelInsightId },
                 relationType: "depends_on",
                 direction: "outbound",
                 explanation: "该实践依赖冻结评估输入形成可复核基线。",
@@ -343,8 +362,25 @@ export const writePublicationFixture = async (
         quote: "Reliable evaluations use frozen inputs",
       },
     ],
+    mechanism: {
+      status: "present",
+      blocks: [
+        {
+          kind: "text",
+          text: "先冻结模型评估输入，再执行显式校验。",
+          evidenceRefs: [
+            {
+              evidenceId: "evidence-2",
+              quote: "Reliable evaluations use frozen inputs",
+            },
+          ],
+        },
+      ],
+    },
     ...(options.evidenceReadingContract
-      ? { relations: { deterministic: [], modelDerived: [] } }
+      ? {
+          relations: { deterministic: [], modelDerived: [] },
+        }
       : {}),
   });
   const modelSource = JSON.stringify({
@@ -361,10 +397,26 @@ export const writePublicationFixture = async (
         }
       : {}),
   });
+  const fallbackSource = JSON.stringify({
+    schemaVersion: 2,
+    id: fallbackSourceId,
+    source: { id: "archive-only-source", name: "Archive-only Source" },
+    title: "Archived relation target 3",
+    officialUrl: "https://example.com/archive-only-3",
+    contentDate: { value: "2026-08-10T08:00:00+00:00", basis: "published_at" },
+    content: [{ kind: "text", text: "This related archive has no current insight." }],
+    archive: {
+      status: "first_success_snapshot",
+      archivedAt: "2026-08-10T08:05:00+00:00",
+      contentSha256: "b".repeat(64),
+      completeness: "complete",
+    },
+  });
   const insightPath = `data/insights/${insightId}.json`;
   const sourcePath = `data/sources/${sourceId}.json`;
   const modelInsightPath = `data/insights/${modelInsightId}.json`;
   const modelSourcePath = `data/sources/${modelSourceId}.json`;
+  const fallbackSourcePath = `data/sources/${fallbackSourceId}.json`;
   const extraSourceId = "source-000000000000000000000001";
   const extraSource = JSON.stringify({
     ...JSON.parse(source),
@@ -454,6 +506,9 @@ export const writePublicationFixture = async (
   await writeFile(join(root, modelInsightPath), modelInsight);
   await writeFile(join(root, sourcePath), source);
   await writeFile(join(root, modelSourcePath), modelSource);
+  if (options.sourceFallbackRelation) {
+    await writeFile(join(root, fallbackSourcePath), fallbackSource);
+  }
   if (options.extraSourceReferencingInsight) {
     await writeFile(join(root, extraSourcePath), extraSource);
   }
@@ -476,6 +531,7 @@ export const writePublicationFixture = async (
     sources: [
       sourcePath,
       modelSourcePath,
+      ...(options.sourceFallbackRelation ? [fallbackSourcePath] : []),
       ...(options.extraSourceReferencingInsight ? [extraSourcePath] : []),
     ],
     ...(includesTopics ? { topics: topicPath } : {}),
@@ -506,6 +562,15 @@ export const writePublicationFixture = async (
       mediaType: "application/json" as const,
       sha256: sha256(modelSource),
     },
+    ...(options.sourceFallbackRelation
+      ? [
+          {
+            path: fallbackSourcePath,
+            mediaType: "application/json" as const,
+            sha256: sha256(fallbackSource),
+          },
+        ]
+      : []),
     ...(includesTopics
       ? [
           {
@@ -583,6 +648,7 @@ export const writePublicationFixture = async (
     mermaidSha256,
     insightId,
     sourceId,
+    fallbackSourceId,
     topicId,
     inputIdentity,
     publicationId,

@@ -89,7 +89,7 @@ const dateLabel = source.contentDate.basis === "published_at" ? "发布于" : "�
       )
     }
     <nav class="archive-actions" aria-label="来源导航">
-      <a href={source.insightUrl}>查看当前洞察</a>
+      {source.insightUrl && <a href={source.insightUrl}>查看当前洞察</a>}
       <a href={source.officialUrl} target="_blank" rel="noopener noreferrer"
         >访问官方原始来源 ↗</a
       >

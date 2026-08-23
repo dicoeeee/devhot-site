@@ -46,6 +46,7 @@ export interface InsightPage {
   readonly relatedReading: {
     readonly deterministic: readonly {
       readonly targetId: string;
+      readonly targetKind: "insight" | "source";
       readonly url: string;
       readonly title: string;
       readonly relationType: string;
@@ -55,6 +56,7 @@ export interface InsightPage {
     }[];
     readonly modelDerived: readonly {
       readonly targetId: string;
+      readonly targetKind: "insight" | "source";
       readonly url: string;
       readonly title: string;
       readonly relationType: string;

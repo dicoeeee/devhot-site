@@ -110,14 +110,18 @@ export interface InsightPublicationInput {
   readonly officialUrl: string;
   readonly relations?: {
     readonly deterministic: readonly {
-      readonly targetInsightId: string;
-      readonly relationType: string;
+      readonly target:
+        | { readonly kind: "insight"; readonly id: string }
+        | { readonly kind: "source"; readonly id: string };
+      readonly relationType: PublicRelationType;
       readonly direction: "undirected" | "outbound" | "inbound";
       readonly basis: string;
     }[];
     readonly modelDerived: readonly {
-      readonly targetInsightId: string;
-      readonly relationType: string;
+      readonly target:
+        | { readonly kind: "insight"; readonly id: string }
+        | { readonly kind: "source"; readonly id: string };
+      readonly relationType: ModelRelationType;
       readonly direction: "undirected" | "outbound" | "inbound";
       readonly explanation: string;
     }[];
@@ -127,7 +131,7 @@ export interface InsightPublicationInput {
 export interface SourceArchivePublicationInput {
   readonly schemaVersion: 1 | 2;
   readonly id: string;
-  readonly insightId: string;
+  readonly insightId?: string;
   readonly source: { readonly id: string; readonly name: string };
   readonly title: string;
   readonly officialUrl: string;
@@ -155,8 +159,23 @@ export interface SourceArchivePublicationInput {
     readonly contentSha256: string;
     readonly completeness: "complete" | "partial";
   };
-  readonly insightUrl: string;
+  readonly insightUrl?: string;
 }
+
+export type PublicRelationType =
+  | "same_object"
+  | "same_problem"
+  | "depends_on"
+  | "integrates_with"
+  | "alternative_to"
+  | "complements"
+  | "evolves_from"
+  | "implements";
+
+export type ModelRelationType = Exclude<
+  PublicRelationType,
+  "same_object" | "alternative_to" | "complements"
+>;
 
 export type TopicTagType = "domain" | "lifecycle" | "problem" | "method";
 

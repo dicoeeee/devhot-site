@@ -397,21 +397,39 @@ export const validatePublicationInput = async (
     ) {
       throw new Error(`insight/source reference mismatch: ${insight.id}`);
     }
+    const mechanismEvidence = new Set(
+      insight.mechanism.blocks.flatMap((block) =>
+        block.evidenceRefs.map(
+          (reference) => `${reference.evidenceId}\0${reference.quote}`,
+        ),
+      ),
+    );
+    const citationEvidence = new Set(
+      insight.citations.map((citation) => `${citation.evidenceId}\0${citation.quote}`),
+    );
+    if (
+      [...mechanismEvidence].sort().join("\n") !== [...citationEvidence].sort().join("\n")
+    ) {
+      throw new Error(`insight citation evidence mismatch: ${insight.id}`);
+    }
     for (const related of [
       ...(insight.relations?.deterministic ?? []),
       ...(insight.relations?.modelDerived ?? []),
     ]) {
       if (
-        related.targetInsightId === insight.id ||
-        !insightsById.has(related.targetInsightId)
+        (related.target.kind === "insight" && related.target.id === insight.id) ||
+        (related.target.kind === "source" && related.target.id === insight.sourceId) ||
+        (related.target.kind === "insight" && !insightsById.has(related.target.id)) ||
+        (related.target.kind === "source" && !sourcesById.has(related.target.id))
       ) {
         throw new Error(
-          `insight relation target mismatch: ${insight.id}/${related.targetInsightId}`,
+          `insight relation target mismatch: ${insight.id}/${related.target.id}`,
         );
       }
     }
   }
   for (const source of sources) {
+    if (!source.insightId) continue;
     const insight = insightsById.get(source.insightId);
     if (
       !insight ||
