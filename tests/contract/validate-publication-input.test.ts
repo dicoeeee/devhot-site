@@ -30,6 +30,17 @@ describe("validatePublicationInput", () => {
     },
   );
 
+  it("rejects citations that do not exactly match mechanism evidence", async () => {
+    const fixture = await writePublicationFixture({
+      evidenceReadingContract: true,
+      mismatchedCitationEvidence: true,
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "insight citation evidence mismatch",
+    );
+  });
+
   it.each(["direction", "overflow", "unknown-type"] as const)(
     "rejects an insight with an invalid related-reading contract: %s",
     async (invalidRelationContract) => {

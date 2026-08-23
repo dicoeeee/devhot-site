@@ -20,6 +20,7 @@ interface PublicationFixtureOptions {
     "duplicate" | "empty" | "missing-primary" | "overflow" | "shared" | "unknown";
   readonly invalidWeeklyRange?: boolean;
   readonly invalidMechanismContract?: "empty-blocks" | "empty-evidence";
+  readonly mismatchedCitationEvidence?: boolean;
   readonly invalidRelationContract?: "direction" | "overflow" | "unknown-type";
   readonly legacyHomeContract?: boolean;
   readonly mermaidMechanismContract?: boolean;
@@ -272,7 +273,9 @@ export const writePublicationFixture = async (
       {
         sourceId,
         evidenceId: "evidence-1",
-        quote: "Reliable agents use immutable inputs",
+        quote: options.mismatchedCitationEvidence
+          ? "Different evidence"
+          : "Reliable agents use immutable inputs",
       },
     ],
     ...(options.evidenceReadingContract
