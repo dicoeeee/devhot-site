@@ -52,7 +52,8 @@ export const copyDeclaredAssets = async ({
     left.path.localeCompare(right.path),
   );
   for (const asset of assets) {
-    await copyFile(asset.fullPath, join(mediaRoot, `${asset.sha256}.png`));
+    const extension = asset.mediaType === "image/svg+xml" ? "svg" : "png";
+    await copyFile(asset.fullPath, join(mediaRoot, `${asset.sha256}.${extension}`));
   }
 
   const metadata = {
@@ -70,8 +71,9 @@ export const copyDeclaredAssets = async ({
       ...topicPages.map((page) => page.url),
     ].sort(),
     assets: assets.map((asset) => ({
-      url: mediaAssetRoute(asset.sha256),
+      url: mediaAssetRoute(asset.sha256, asset.mediaType),
       sha256: asset.sha256,
+      mediaType: asset.mediaType,
     })),
   };
   await writeFile(

@@ -5,6 +5,17 @@ import { validatePublicationInput } from "../../src/content/adapters/publication
 import { writePublicationFixture } from "../support/publication-fixture";
 
 describe("validatePublicationInput", () => {
+  it("rejects a v2 source archive that omits required integrity evidence", async () => {
+    const fixture = await writePublicationFixture({
+      evidenceReadingContract: true,
+      omitRequiredArchiveEvidence: true,
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "invalid source input",
+    );
+  });
+
   it("returns a verified input for a complete, hash-bound publication", async () => {
     const fixture = await writePublicationFixture();
 

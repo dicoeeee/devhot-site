@@ -15,51 +15,142 @@ interface Props {
 
 const { insight } = Astro.props;
 const dateLabel = insight.contentDate.basis === "published_at" ? "发布于" : "抓取于";
+const hasRelatedReading =
+  insight.relatedReading.deterministic.length > 0 ||
+  insight.relatedReading.modelDerived.length > 0;
 ---
 
 <SiteLayout title={`${insight.title} · DEVHOT`} canonicalPath={insight.url}>
-  <main class="reading-page insight-page">
-    <p class="section-label">当前洞察 · {insight.domain}</p>
-    <h1>{insight.title}</h1>
-    <p>
-      <span>{dateLabel}</span>
-      <time datetime={insight.contentDate.value}>{insight.contentDate.value}</time>
-    </p>
-    <section>
-      <h2>核心判断</h2>
-      <p>{insight.summary}</p>
-    </section>
-    {
-      insight.mechanism.status === "present" && (
-        <section>
-          <h2>技术机制</h2>
-          {insight.mechanism.blocks.map((block) => (
-            <p>{block.text}</p>
-          ))}
+  <main class="reading-page insight-page research-brief">
+    <header class="brief-head">
+      <p>RESEARCH BRIEF</p>
+      <h1>{insight.title}</h1>
+    </header>
+    <div class="brief-layout">
+      <aside class="brief-facts">
+        <h2>阅读信息</h2>
+        <dl>
+          <div>
+            <dt>领域归属</dt><dd>{(insight.domains ?? [insight.domain]).join("、")}</dd>
+          </div>
+          <div><dt>编号</dt><dd>{insight.facts.number}</dd></div>
+          <div><dt>来源</dt><dd>{insight.facts.source.name}</dd></div>
+          <div>
+            <dt>{dateLabel}</dt>
+            <dd>
+              <time datetime={insight.contentDate.value}>{insight.contentDate.value}</time
+              >
+            </dd>
+          </div>
+          {
+            insight.facts.topics.length > 0 && (
+              <div>
+                <dt>主题</dt>
+                <dd>
+                  {insight.facts.topics.map((topic) => (
+                    <a href={topic.url}>{topic.name}</a>
+                  ))}
+                </dd>
+              </div>
+            )
+          }
+          {
+            insight.tags.length > 0 && (
+              <div>
+                <dt>标签</dt>
+                <dd>{insight.tags.map((tag) => tag.name).join("、")}</dd>
+              </div>
+            )
+          }
+        </dl>
+        <p class="brief-version">{insight.facts.version}</p>
+        <nav class="brief-actions" aria-label="洞察阅读路径">
+          <a href={insight.sourceUrl}>阅读归档原文 <span aria-hidden="true">→</span></a>
+          <a href={insight.officialUrl} target="_blank" rel="noopener noreferrer"
+            >访问官方原始来源 <span aria-hidden="true">↗</span></a
+          >
+        </nav>
+      </aside>
+      <article class="brief-article">
+        <section class="brief-takeaway">
+          <h2>核心判断</h2>
+          <p>{insight.summary}</p>
         </section>
-      )
-    }
-    <section>
-      <h2>关键解读</h2>
-      <p>{insight.keyInterpretation}</p>
-    </section>
-    <section>
-      <h2>领域启示</h2>
-      <p>{insight.domainImplications}</p>
-    </section>
-    {
-      insight.citations.length > 0 && (
+        {
+          insight.mechanism.status === "present" &&
+            insight.mechanism.blocks.length > 0 && (
+              <section>
+                <h2>技术机制</h2>
+                {insight.mechanism.blocks.map((block) => (
+                  <div class="mechanism-block">
+                    {block.visual && (
+                      <figure>
+                        <img src={block.visual.url} alt={block.visual.alt} />
+                        {block.visual.caption && (
+                          <figcaption>{block.visual.caption}</figcaption>
+                        )}
+                      </figure>
+                    )}
+                    <p>{block.text}</p>
+                  </div>
+                ))}
+              </section>
+            )
+        }
         <section>
-          <h2>引用</h2>
-          {insight.citations.map((citation) => (
-            <blockquote>{citation.quote}</blockquote>
-          ))}
+          <h2>为什么重要</h2>
+          <p>{insight.keyInterpretation}</p>
         </section>
-      )
-    }
-    <nav aria-label="洞察来源">
-      <a href={insight.sourceUrl}>阅读归档原文</a>
-      <a href={insight.officialUrl}>访问官方原文</a>
-    </nav>
+        <section>
+          <h2>适用范围</h2>
+          <p>{insight.domainImplications}</p>
+        </section>
+        {
+          insight.citations.length > 0 && (
+            <section class="brief-citations">
+              <h2>来源依据</h2>
+              {insight.citations.map((citation) => (
+                <blockquote>{citation.quote}</blockquote>
+              ))}
+            </section>
+          )
+        }
+        {
+          hasRelatedReading && (
+            <section class="related-reading">
+              <h2>相关阅读</h2>
+              {insight.relatedReading.deterministic.length > 0 && (
+                <div>
+                  <h3>确定性相关阅读</h3>
+                  <ul>
+                    {insight.relatedReading.deterministic.map((related) => (
+                      <li>
+                        <span class="relation-label">{related.relationLabel}</span>
+                        <a href={related.url}>{related.title}</a>
+                        <p>{related.basis}</p>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {insight.relatedReading.modelDerived.length > 0 && (
+                <div>
+                  <h3>模型派生相关阅读</h3>
+                  <ul>
+                    {insight.relatedReading.modelDerived.map((related) => (
+                      <li>
+                        <span class="relation-label">{related.relationLabel}</span>
+                        <a href={related.url}>{related.title}</a>
+                        <p>{related.explanation}</p>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </section>
+          )
+        }
+      </article>
+    </div>
   </main>
 </SiteLayout>

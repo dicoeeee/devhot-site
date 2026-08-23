@@ -10,4 +10,7 @@ export const topicRoute = (id: string, topicPage = 1): string =>
 export const topicTagAnchor = (type: string, name: string): string =>
   `tag-${type}-${name}`;
 
-export const mediaAssetRoute = (sha256: string): string => `/media/sha256/${sha256}.png`;
+export const mediaAssetRoute = (
+  sha256: string,
+  mediaType: "image/png" | "image/svg+xml" = "image/png",
+): string => `/media/sha256/${sha256}.${mediaType === "image/svg+xml" ? "svg" : "png"}`;

@@ -10,6 +10,8 @@ import {
 
 interface PublicationFixtureOptions {
   readonly danglingLogoReference?: boolean;
+  readonly evidenceReadingContract?: boolean;
+  readonly omitRequiredArchiveEvidence?: boolean;
   readonly duplicateEditorialDomain?: "model-research" | "software-engineering";
   readonly emptyTopic?: boolean;
   readonly extraSourceReferencingInsight?: boolean;
@@ -18,6 +20,7 @@ interface PublicationFixtureOptions {
     "duplicate" | "empty" | "missing-primary" | "overflow" | "shared" | "unknown";
   readonly invalidWeeklyRange?: boolean;
   readonly legacyHomeContract?: boolean;
+  readonly mermaidMechanismContract?: boolean;
   readonly missingWeeklyOverview?: boolean;
   readonly omitTopics?: boolean;
   readonly recentInsightSelection?:
@@ -41,6 +44,10 @@ export const writePublicationFixture = async (
   const logo = "original-logo-bytes";
   const logoSha256 = sha256(logo);
   const logoPath = `assets/sha256/${logoSha256}.png`;
+  const mermaidSvg =
+    '<svg xmlns="http://www.w3.org/2000/svg"><text>freeze then validate</text></svg>';
+  const mermaidSha256 = sha256(mermaidSvg);
+  const mermaidPath = `assets/sha256/${mermaidSha256}.svg`;
   const insightId = "insight-59498e27cf7aac1a9e4f9a76";
   const sourceId = "source-59498e27cf7aac1a9e4f9a76";
   const modelInsightId = "insight-000000000000000000000002";
@@ -188,7 +195,7 @@ export const writePublicationFixture = async (
         },
   );
   const insight = JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: options.evidenceReadingContract ? 2 : 1,
     id: insightId,
     sourceId,
     domain: "software-engineering",
@@ -209,6 +216,40 @@ export const writePublicationFixture = async (
             },
           ],
         },
+        ...(options.evidenceReadingContract
+          ? [
+              {
+                kind: "source_image",
+                text: "冻结来源图展示输入先于校验进入流水线。",
+                assetPath: logoPath,
+                alt: "冻结输入架构图",
+                caption: "来源归档中的原始架构图",
+                evidenceRefs: [
+                  {
+                    evidenceId: "evidence-1",
+                    quote: "Reliable agents use immutable inputs",
+                  },
+                ],
+              },
+            ]
+          : []),
+        ...(options.mermaidMechanismContract
+          ? [
+              {
+                kind: "technical_flow_mermaid",
+                text: "冻结的 Mermaid 技术流程图。",
+                assetPath: mermaidPath,
+                alt: "冻结后校验的技术流程",
+                caption: "由已冻结 Mermaid 输入确定性渲染",
+                evidenceRefs: [
+                  {
+                    evidenceId: "evidence-1",
+                    quote: "Reliable agents use immutable inputs",
+                  },
+                ],
+              },
+            ]
+          : []),
       ],
     },
     keyInterpretation: "关键变化是把输出绑定到可审计输入。",
@@ -224,19 +265,61 @@ export const writePublicationFixture = async (
         quote: "Reliable agents use immutable inputs",
       },
     ],
+    ...(options.evidenceReadingContract
+      ? {
+          relations: {
+            deterministic: [
+              {
+                targetInsightId: modelInsightId,
+                relationType: "same_object",
+                direction: "undirected",
+                basis: "共享同一经过验证的 repository identity。",
+              },
+            ],
+            modelDerived: [
+              {
+                targetInsightId: modelInsightId,
+                relationType: "depends_on",
+                direction: "outbound",
+                explanation: "该实践依赖冻结评估输入形成可复核基线。",
+              },
+            ],
+          },
+        }
+      : {}),
     sourceUrl: `/sources/${sourceId}/`,
     officialUrl: "https://example.com/reliable-agent-1",
   });
   const source = JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: options.evidenceReadingContract ? 2 : 1,
     id: sourceId,
     insightId,
     source: { id: "fixture-source", name: "Fixture Source" },
     title: "Reliable agent architecture 1",
     officialUrl: "https://example.com/reliable-agent-1",
     contentDate: { value: "2026-08-11T08:00:00+00:00", basis: "published_at" },
-    body: { format: "markdown", parts: ["Reliable agents use immutable inputs."] },
-    images: [{ assetPath: logoPath, alt: "Architecture", position: 1 }],
+    ...(options.evidenceReadingContract
+      ? {
+          content: [
+            { kind: "text", text: "Reliable agents use immutable inputs." },
+            { kind: "image", assetPath: logoPath, alt: "Architecture" },
+            { kind: "text", text: "Validation follows the frozen input." },
+          ],
+          ...(options.omitRequiredArchiveEvidence
+            ? {}
+            : {
+                archive: {
+                  status: "first_success_snapshot",
+                  archivedAt: "2026-08-11T08:05:00+00:00",
+                  contentSha256: "a".repeat(64),
+                  completeness: "complete",
+                },
+              }),
+        }
+      : {
+          body: { format: "markdown", parts: ["Reliable agents use immutable inputs."] },
+          images: [{ assetPath: logoPath, alt: "Architecture", position: 1 }],
+        }),
     insightUrl: `/insights/${insightId}/`,
   });
   const modelInsight = JSON.stringify({
@@ -260,6 +343,9 @@ export const writePublicationFixture = async (
         quote: "Reliable evaluations use frozen inputs",
       },
     ],
+    ...(options.evidenceReadingContract
+      ? { relations: { deterministic: [], modelDerived: [] } }
+      : {}),
   });
   const modelSource = JSON.stringify({
     ...JSON.parse(source),
@@ -269,6 +355,11 @@ export const writePublicationFixture = async (
     title: "Reliable model architecture 2",
     officialUrl: "https://example.com/reliable-model-2",
     insightUrl: `/insights/${modelInsightId}/`,
+    ...(options.evidenceReadingContract
+      ? {
+          content: [{ kind: "text", text: "Reliable model evaluation source." }],
+        }
+      : {}),
   });
   const insightPath = `data/insights/${insightId}.json`;
   const sourcePath = `data/sources/${sourceId}.json`;
@@ -370,6 +461,9 @@ export const writePublicationFixture = async (
     await writeFile(join(root, unreferencedJsonPath), unreferencedJson);
   }
   await writeFile(join(root, logoPath), logo);
+  if (options.mermaidMechanismContract) {
+    await writeFile(join(root, mermaidPath), mermaidSvg);
+  }
   const unreferenced = "unreferenced";
   const unreferencedSha256 = sha256(unreferenced);
   const unreferencedPath = `assets/sha256/${unreferencedSha256}.png`;
@@ -444,6 +538,15 @@ export const writePublicationFixture = async (
       mediaType: "image/png" as const,
       sha256: logoSha256,
     },
+    ...(options.mermaidMechanismContract
+      ? [
+          {
+            path: mermaidPath,
+            mediaType: "image/svg+xml" as const,
+            sha256: mermaidSha256,
+          },
+        ]
+      : []),
     ...(options.unreferencedAsset
       ? [
           {
@@ -477,6 +580,7 @@ export const writePublicationFixture = async (
     root,
     logoPath,
     logoSha256,
+    mermaidSha256,
     insightId,
     sourceId,
     topicId,

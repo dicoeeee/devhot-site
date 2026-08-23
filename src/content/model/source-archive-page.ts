@@ -19,4 +19,14 @@ export interface SourceArchivePage {
     readonly alt: string;
     readonly position: number;
   }[];
+  readonly content: readonly (
+    | { readonly kind: "text"; readonly text: string }
+    | { readonly kind: "image"; readonly url: string; readonly alt: string }
+  )[];
+  readonly archive?: {
+    readonly status: "first_success_snapshot";
+    readonly archivedAt: string;
+    readonly contentSha256: string;
+    readonly completeness: "complete" | "partial";
+  };
 }

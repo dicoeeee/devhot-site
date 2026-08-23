@@ -10,7 +10,7 @@ interface PublicationIdentityFields {
   };
   readonly files: readonly {
     readonly path: string;
-    readonly mediaType: "application/json" | "image/png";
+    readonly mediaType: "application/json" | "image/png" | "image/svg+xml";
     readonly sha256: string;
   }[];
 }

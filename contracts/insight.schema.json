@@ -20,7 +20,7 @@
     "officialUrl"
   ],
   "properties": {
-    "schemaVersion": { "const": 1 },
+    "schemaVersion": { "enum": [1, 2] },
     "id": { "type": "string", "pattern": "^insight-[a-f0-9]{24}$" },
     "sourceId": { "type": "string", "pattern": "^source-[a-f0-9]{24}$" },
     "domain": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
@@ -42,21 +42,7 @@
         "status": { "enum": ["present", "no_supported_content"] },
         "blocks": {
           "type": "array",
-          "items": {
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["kind", "text", "evidenceRefs"],
-            "properties": {
-              "kind": {
-                "enum": ["text", "source_image", "technical_flow_mermaid"]
-              },
-              "text": { "type": "string", "minLength": 1 },
-              "evidenceRefs": {
-                "type": "array",
-                "items": { "$ref": "#/$defs/evidenceRef" }
-              }
-            }
-          }
+          "items": { "$ref": "#/$defs/evidenceMechanismBlock" }
         }
       }
     },
@@ -87,16 +73,49 @@
         }
       }
     },
-    "sourceUrl": {
-      "type": "string",
-      "pattern": "^/sources/source-[a-f0-9]{24}/$"
+    "relations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["deterministic", "modelDerived"],
+      "properties": {
+        "deterministic": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/deterministicRelation" }
+        },
+        "modelDerived": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/modelRelation" }
+        }
+      }
     },
+    "sourceUrl": { "type": "string", "pattern": "^/sources/source-[a-f0-9]{24}/$" },
     "officialUrl": { "type": "string", "pattern": "^https://" }
   },
+  "allOf": [
+    {
+      "if": { "properties": { "schemaVersion": { "const": 1 } } },
+      "then": {
+        "properties": {
+          "relations": false,
+          "mechanism": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["status", "blocks"],
+            "properties": {
+              "status": { "enum": ["present", "no_supported_content"] },
+              "blocks": {
+                "type": "array",
+                "items": { "$ref": "#/$defs/legacyMechanismBlock" }
+              }
+            }
+          }
+        }
+      },
+      "else": { "required": ["relations"], "properties": { "relations": {} } }
+    }
+  ],
   "$defs": {
-    "editorialDomainId": {
-      "enum": ["software-engineering", "model-research"]
-    },
+    "editorialDomainId": { "enum": ["software-engineering", "model-research"] },
     "contentDate": {
       "type": "object",
       "additionalProperties": false,
@@ -113,6 +132,74 @@
       "properties": {
         "evidenceId": { "type": "string", "minLength": 1 },
         "quote": { "type": "string", "minLength": 1 }
+      }
+    },
+    "legacyMechanismBlock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "text", "evidenceRefs"],
+      "properties": {
+        "kind": { "enum": ["text", "source_image", "technical_flow_mermaid"] },
+        "text": { "type": "string", "minLength": 1 },
+        "evidenceRefs": { "type": "array", "items": { "$ref": "#/$defs/evidenceRef" } }
+      }
+    },
+    "evidenceMechanismBlock": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text", "evidenceRefs"],
+          "properties": {
+            "kind": { "const": "text" },
+            "text": { "type": "string", "minLength": 1 },
+            "evidenceRefs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/evidenceRef" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text", "assetPath", "alt", "evidenceRefs"],
+          "properties": {
+            "kind": { "enum": ["source_image", "technical_flow_mermaid"] },
+            "text": { "type": "string", "minLength": 1 },
+            "assetPath": {
+              "type": "string",
+              "pattern": "^assets/sha256/[a-f0-9]{64}\\.(?:png|svg)$"
+            },
+            "alt": { "type": "string", "minLength": 1 },
+            "caption": { "type": "string", "minLength": 1 },
+            "evidenceRefs": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/evidenceRef" }
+            }
+          }
+        }
+      ]
+    },
+    "deterministicRelation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetInsightId", "relationType", "direction", "basis"],
+      "properties": {
+        "targetInsightId": { "type": "string", "pattern": "^insight-[a-f0-9]{24}$" },
+        "relationType": { "type": "string", "minLength": 1 },
+        "direction": { "enum": ["undirected", "outbound", "inbound"] },
+        "basis": { "type": "string", "minLength": 1 }
+      }
+    },
+    "modelRelation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["targetInsightId", "relationType", "direction", "explanation"],
+      "properties": {
+        "targetInsightId": { "type": "string", "pattern": "^insight-[a-f0-9]{24}$" },
+        "relationType": { "type": "string", "minLength": 1 },
+        "direction": { "enum": ["undirected", "outbound", "inbound"] },
+        "explanation": { "type": "string", "minLength": 1 }
       }
     }
   }

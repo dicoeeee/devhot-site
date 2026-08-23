@@ -19,23 +19,80 @@ const dateLabel = source.contentDate.basis === "published_at" ? "发布于" : "�
 
 <SiteLayout title={`${source.title} · 来源归档`} canonicalPath={source.url}>
   <main class="reading-page source-page">
-    <p class="section-label">来源归档 · {source.source.name}</p>
-    <h1>{source.title}</h1>
-    <p>
-      <span>{dateLabel}</span>
-      <time datetime={source.contentDate.value}>{source.contentDate.value}</time>
-    </p>
+    <header class="archive-head">
+      <p class="section-label">ARCHIVED SOURCE · {source.source.name}</p>
+      <p class="archive-date">
+        <span>{dateLabel}</span>
+        <time datetime={source.contentDate.value}>{source.contentDate.value}</time>
+      </p>
+      <h1>{source.title}</h1>
+    </header>
     <article class="archived-body">
-      {source.body.parts.map((part) => <p>{part}</p>)}
+      {
+        source.content.map((block) =>
+          block.kind === "text" ? (
+            <p>{block.text}</p>
+          ) : (
+            <img src={block.url} alt={block.alt} loading="lazy" />
+          ),
+        )
+      }
     </article>
-    {source.images.map((image) => <img src={image.url} alt={image.alt} loading="lazy" />)}
-    <section>
-      <h2>来源与完整性</h2>
-      <p>归档正文来自首次成功存档；时间依据按上方标签明确区分。</p>
-    </section>
-    <nav aria-label="来源导航">
+    {
+      source.archive && (
+        <footer class="archive-evidence">
+          <header>
+            <>
+              <p>原文证据</p>
+              <h2>归档身份与完整性</h2>
+            </>
+          </header>
+          <dl>
+            <div>
+              <>
+                <dt>归档状态</dt>
+                <dd>首次成功快照</dd>
+              </>
+            </div>
+            <div>
+              <>
+                <dt>时间依据</dt>
+                <dd>{dateLabel}</dd>
+              </>
+            </div>
+            <div>
+              <>
+                <dt>内容校验</dt>
+                <dd>SHA-256 / {source.archive.contentSha256}</dd>
+              </>
+            </div>
+            <div>
+              <dt>内容完整性</dt>
+              <dd>
+                {source.archive.completeness === "complete"
+                  ? "正文与图片完整"
+                  : "部分图片缺失"}
+              </dd>
+            </div>
+            <div>
+              <>
+                <dt>归档时间</dt>
+                <dd>
+                  <time datetime={source.archive.archivedAt}>
+                    {source.archive.archivedAt}
+                  </time>
+                </dd>
+              </>
+            </div>
+          </dl>
+        </footer>
+      )
+    }
+    <nav class="archive-actions" aria-label="来源导航">
       <a href={source.insightUrl}>查看当前洞察</a>
-      <a href={source.officialUrl}>访问官方原文</a>
+      <a href={source.officialUrl} target="_blank" rel="noopener noreferrer"
+        >访问官方原始来源 ↗</a
+      >
     </nav>
   </main>
 </SiteLayout>

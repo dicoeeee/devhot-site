@@ -21,7 +21,7 @@ import type {
 
 interface ManifestFile {
   readonly path: string;
-  readonly mediaType: "application/json" | "image/png";
+  readonly mediaType: "application/json" | "image/png" | "image/svg+xml";
   readonly sha256: string;
 }
 
@@ -204,9 +204,10 @@ export const validatePublicationInput = async (
       throw new Error(`sha256 mismatch for ${file.path}`);
     }
     if (file.path.startsWith("assets/")) {
+      const extension = file.mediaType === "image/svg+xml" ? "svg" : "png";
       if (
-        file.mediaType !== "image/png" ||
-        file.path !== `assets/sha256/${file.sha256}.png`
+        (file.mediaType !== "image/png" && file.mediaType !== "image/svg+xml") ||
+        file.path !== `assets/sha256/${file.sha256}.${extension}`
       ) {
         throw new Error(`asset path is not content addressed: ${file.path}`);
       }
@@ -396,6 +397,19 @@ export const validatePublicationInput = async (
     ) {
       throw new Error(`insight/source reference mismatch: ${insight.id}`);
     }
+    for (const related of [
+      ...(insight.relations?.deterministic ?? []),
+      ...(insight.relations?.modelDerived ?? []),
+    ]) {
+      if (
+        related.targetInsightId === insight.id ||
+        !insightsById.has(related.targetInsightId)
+      ) {
+        throw new Error(
+          `insight relation target mismatch: ${insight.id}/${related.targetInsightId}`,
+        );
+      }
+    }
   }
   for (const source of sources) {
     const insight = insightsById.get(source.insightId);
@@ -411,9 +425,20 @@ export const validatePublicationInput = async (
 
   const referencedAssets = new Set<string>([
     home.masthead.logoAssetPath,
-    ...sources.flatMap((source) => source.images.map((image) => image.assetPath)),
+    ...sources.flatMap((source) =>
+      source.schemaVersion === 1
+        ? (source.images ?? []).map((image) => image.assetPath)
+        : (source.content ?? []).flatMap((block) =>
+            block.kind === "image" ? [block.assetPath] : [],
+          ),
+    ),
+    ...insights.flatMap((insight) =>
+      insight.mechanism.blocks.flatMap((block) =>
+        block.assetPath ? [block.assetPath] : [],
+      ),
+    ),
   ]);
-  if (!assets.has(home.masthead.logoAssetPath)) {
+  if (assets.get(home.masthead.logoAssetPath)?.mediaType !== "image/png") {
     throw new Error("home page logoAssetPath must reference a declared PNG asset");
   }
   for (const path of referencedAssets) {
