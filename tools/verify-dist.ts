@@ -10,7 +10,11 @@ interface PublicationMetadata {
   readonly publicationId: string;
   readonly buildSha: string;
   readonly routes: readonly string[];
-  readonly assets: readonly { readonly url: string; readonly sha256: string }[];
+  readonly assets: readonly {
+    readonly url: string;
+    readonly sha256: string;
+    readonly mediaType: "image/png" | "image/svg+xml";
+  }[];
 }
 
 interface VerifyDistributionOptions {
@@ -52,6 +56,7 @@ const parseMetadata = (value: unknown): PublicationMetadata => {
         typeof asset === "object" &&
         typeof asset.url === "string" &&
         typeof asset.sha256 === "string" &&
+        (asset.mediaType === "image/png" || asset.mediaType === "image/svg+xml") &&
         /^[a-f0-9]{64}$/.test(asset.sha256),
     )
   ) {
@@ -128,17 +133,22 @@ export const verifyDistribution = async ({
     }
   }
 
-  const expectedAssetNames = metadata.assets.map((asset) => `${asset.sha256}.png`).sort();
+  const expectedAssetNames = metadata.assets
+    .map(
+      (asset) => `${asset.sha256}.${asset.mediaType === "image/svg+xml" ? "svg" : "png"}`,
+    )
+    .sort();
   const mediaRoot = join(distRoot, "media", "sha256");
   const actualAssetNames = (await readdir(mediaRoot)).sort();
   if (actualAssetNames.join("\n") !== expectedAssetNames.join("\n")) {
     throw new Error("distribution media set differs from publication metadata");
   }
   for (const asset of metadata.assets) {
-    if (asset.url !== `/media/sha256/${asset.sha256}.png`) {
+    const extension = asset.mediaType === "image/svg+xml" ? "svg" : "png";
+    if (asset.url !== `/media/sha256/${asset.sha256}.${extension}`) {
       throw new Error(`asset URL is not content addressed: ${asset.url}`);
     }
-    const fullPath = join(mediaRoot, `${asset.sha256}.png`);
+    const fullPath = join(mediaRoot, `${asset.sha256}.${extension}`);
     const fileStat = await stat(fullPath);
     if (!fileStat.isFile() || (fileStat.mode & 0o111) !== 0) {
       throw new Error(`invalid output asset mode: ${asset.url}`);

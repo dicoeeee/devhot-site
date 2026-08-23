@@ -98,6 +98,86 @@ describe("SiteContentRepository", () => {
     });
   });
 
+  it("exposes the research brief facts, evidence-bound visuals, and separated related reading", async () => {
+    const fixture = await writePublicationFixture({ evidenceReadingContract: true });
+    const repository = await createSiteContentRepository(fixture.root);
+
+    const insight = (await repository.listInsights()).find(
+      (candidate) => candidate.id === fixture.insightId,
+    );
+    const source = (await repository.listSourceArchives()).find(
+      (candidate) => candidate.id === fixture.sourceId,
+    );
+
+    expect(insight).toMatchObject({
+      facts: {
+        number: "59498E27",
+        source: { id: "fixture-source", name: "Fixture Source" },
+        version: "当前有效版本",
+        topics: [{ id: fixture.topicId, name: "可靠 Agent 交付" }],
+      },
+      relatedReading: {
+        deterministic: [
+          {
+            targetId: "insight-000000000000000000000002",
+            targetKind: "insight",
+            relationType: "same_object",
+            relationLabel: "同一技术对象",
+            direction: "undirected",
+            basis: "共享同一经过验证的 repository identity。",
+          },
+        ],
+        modelDerived: [
+          {
+            targetId: "insight-000000000000000000000002",
+            targetKind: "insight",
+            relationType: "depends_on",
+            relationLabel: "依赖",
+            direction: "outbound",
+            explanation: "该实践依赖冻结评估输入形成可复核基线。",
+          },
+        ],
+      },
+    });
+    expect(insight?.mechanism.blocks[1]).toMatchObject({
+      kind: "source_image",
+      visual: {
+        alt: "冻结输入架构图",
+        caption: "来源归档中的原始架构图",
+      },
+    });
+    expect(source?.content.map((block) => block.kind)).toEqual(["text", "image", "text"]);
+    expect(source?.archive).toEqual({
+      status: "first_success_snapshot",
+      archivedAt: "2026-08-11T08:05:00+00:00",
+      contentSha256: "a".repeat(64),
+      completeness: "complete",
+    });
+  });
+
+  it("links related reading to a source archive when no current insight exists", async () => {
+    const fixture = await writePublicationFixture({
+      evidenceReadingContract: true,
+      sourceFallbackRelation: true,
+    });
+    const repository = await createSiteContentRepository(fixture.root);
+    const insight = (await repository.listInsights()).find(
+      (candidate) => candidate.id === fixture.insightId,
+    );
+
+    expect(insight?.relatedReading.deterministic[0]).toMatchObject({
+      targetId: fixture.fallbackSourceId,
+      targetKind: "source",
+      url: `/sources/${fixture.fallbackSourceId}/`,
+      title: "Archived relation target 3",
+    });
+    expect(
+      (await repository.listSourceArchives()).find(
+        (source) => source.id === fixture.fallbackSourceId,
+      ),
+    ).not.toHaveProperty("insightUrl");
+  });
+
   it("exposes topic-first domain indexes and the latest confirmed judgment", async () => {
     const fixture = await writePublicationFixture();
     const repository = await createSiteContentRepository(fixture.root);

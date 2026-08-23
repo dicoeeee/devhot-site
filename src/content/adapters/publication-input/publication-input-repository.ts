@@ -8,7 +8,32 @@ import {
   topicTagAnchor,
 } from "../../model/site-routes";
 import type { SiteContentRepository } from "../../ports/site-content-repository";
-import type { EditorialDomainId, VerifiedPublicationInput } from "./publication-input";
+import type {
+  EditorialDomainId,
+  PublicRelationType,
+  VerifiedPublicationInput,
+} from "./publication-input";
+
+const readerRelationLabel = (
+  relationType: PublicRelationType,
+  direction: "undirected" | "outbound" | "inbound",
+): string => {
+  if (relationType === "depends_on") return direction === "inbound" ? "被依赖" : "依赖";
+  if (relationType === "evolves_from")
+    return direction === "inbound" ? "后续演进" : "演进自";
+  if (relationType === "implements") return direction === "inbound" ? "由其实现" : "实现";
+  const labels: Record<
+    Exclude<PublicRelationType, "depends_on" | "evolves_from" | "implements">,
+    string
+  > = {
+    same_object: "同一技术对象",
+    same_problem: "解决同一问题",
+    integrates_with: "集成协作",
+    alternative_to: "替代方案",
+    complements: "互为补充",
+  };
+  return labels[relationType];
+};
 
 export const createPublicationInputRepository = (
   input: VerifiedPublicationInput,
@@ -21,11 +46,37 @@ export const createPublicationInputRepository = (
     publication: input.home.masthead.publication,
     journal: input.home.masthead.journal,
     attribution: input.home.masthead.attribution,
-    logoUrl: mediaAssetRoute(logo.sha256),
+    logoUrl: mediaAssetRoute(logo.sha256, logo.mediaType),
   } as const;
   const sourcesByInsightId = new Map(
-    input.sources.map((source) => [source.insightId, source]),
+    input.sources.flatMap((source) =>
+      source.insightId ? ([[source.insightId, source]] as const) : [],
+    ),
   );
+  const insightsById = new Map(input.insights.map((insight) => [insight.id, insight]));
+  const sourcesById = new Map(input.sources.map((source) => [source.id, source]));
+  const relatedTarget = (target: { kind: "insight" | "source"; id: string }) => {
+    const item =
+      target.kind === "insight"
+        ? insightsById.get(target.id)
+        : sourcesById.get(target.id);
+    if (!item) throw new Error(`verified relation target is unavailable: ${target.id}`);
+    return {
+      targetId: item.id,
+      targetKind: target.kind,
+      url:
+        target.kind === "insight" ? insightRoute(item.id) : sourceArchiveRoute(item.id),
+      title: item.title,
+    } as const;
+  };
+  const topicsForInsight = (insightId: string) =>
+    (input.topics?.topics ?? [])
+      .filter((topic) => topic.currentMemberInsightIds.includes(insightId))
+      .map((topic) => ({
+        id: topic.id,
+        name: topic.name,
+        url: topicRoute(topic.id),
+      }));
 
   const homes = (): readonly HomePage[] => {
     const home = input.home;
@@ -47,7 +98,6 @@ export const createPublicationInputRepository = (
     const availableDomains = home.domains.map((domainHome) => ({
       ...domainHome.domain,
     }));
-    const insightsById = new Map(input.insights.map((insight) => [insight.id, insight]));
     return home.domains.map((domainHome) => ({
       layout: "editorial" as const,
       ...(input.topics ? { topicsUrl: topicOverviewRoute(domainHome.domain.id) } : {}),
@@ -93,14 +143,34 @@ export const createPublicationInputRepository = (
       domain: insight.domain,
       ...(insight.domains ? { domains: [...insight.domains] } : {}),
       title: insight.title,
+      facts: {
+        number: insight.id.slice("insight-".length, "insight-".length + 8).toUpperCase(),
+        source: {
+          ...(sourcesByInsightId.get(insight.id)?.source ?? { id: "", name: "" }),
+        },
+        version: "当前有效版本" as const,
+        topics: topicsForInsight(insight.id),
+      },
       contentDate: { ...insight.contentDate },
       summary: insight.summary,
       mechanism: {
         status: insight.mechanism.status,
-        blocks: insight.mechanism.blocks.map((block) => ({
-          kind: block.kind,
-          text: block.text,
-        })),
+        blocks: insight.mechanism.blocks.map((block) => {
+          const asset = block.assetPath ? input.assets.get(block.assetPath) : undefined;
+          return {
+            kind: block.kind,
+            text: block.text,
+            ...(asset && block.alt
+              ? {
+                  visual: {
+                    url: mediaAssetRoute(asset.sha256, asset.mediaType),
+                    alt: block.alt,
+                    ...(block.caption ? { caption: block.caption } : {}),
+                  },
+                }
+              : {}),
+          };
+        }),
       },
       keyInterpretation: insight.keyInterpretation,
       domainImplications: insight.domainImplications,
@@ -109,6 +179,26 @@ export const createPublicationInputRepository = (
         evidenceId: citation.evidenceId,
         quote: citation.quote,
       })),
+      relatedReading: {
+        deterministic: (insight.relations?.deterministic ?? []).map((relation) => {
+          return {
+            ...relatedTarget(relation.target),
+            relationType: relation.relationType,
+            relationLabel: readerRelationLabel(relation.relationType, relation.direction),
+            direction: relation.direction,
+            basis: relation.basis,
+          };
+        }),
+        modelDerived: (insight.relations?.modelDerived ?? []).map((relation) => {
+          return {
+            ...relatedTarget(relation.target),
+            relationType: relation.relationType,
+            relationLabel: readerRelationLabel(relation.relationType, relation.direction),
+            direction: relation.direction,
+            explanation: relation.explanation,
+          };
+        }),
+      },
     }));
 
   const topicTagLinks = (topic: NonNullable<typeof input.topics>["topics"][number]) => {
@@ -283,23 +373,61 @@ export const createPublicationInputRepository = (
       return input.sources.map((source) => ({
         id: source.id,
         url: sourceArchiveRoute(source.id),
-        insightId: source.insightId,
-        insightUrl: source.insightUrl,
+        ...(source.insightId ? { insightId: source.insightId } : {}),
+        ...(source.insightUrl ? { insightUrl: source.insightUrl } : {}),
         officialUrl: source.officialUrl,
         source: { ...source.source },
         title: source.title,
         contentDate: { ...source.contentDate },
-        body: { format: source.body.format, parts: [...source.body.parts] },
-        images: source.images.map((image) => {
+        body: {
+          format: source.body?.format ?? "markdown",
+          parts: [...(source.body?.parts ?? [])],
+        },
+        images: (source.images ?? []).map((image) => {
           const asset = input.assets.get(image.assetPath);
           if (!asset)
             throw new Error(`verified source image is unavailable: ${image.assetPath}`);
           return {
-            url: mediaAssetRoute(asset.sha256),
+            url: mediaAssetRoute(asset.sha256, asset.mediaType),
             alt: image.alt,
             position: image.position,
           };
         }),
+        content:
+          source.schemaVersion === 2
+            ? (source.content ?? []).map((block) => {
+                if (block.kind === "text")
+                  return { kind: "text" as const, text: block.text };
+                const asset = input.assets.get(block.assetPath);
+                if (!asset)
+                  throw new Error(
+                    `verified source image is unavailable: ${block.assetPath}`,
+                  );
+                return {
+                  kind: "image" as const,
+                  url: mediaAssetRoute(asset.sha256, asset.mediaType),
+                  alt: block.alt,
+                };
+              })
+            : [
+                ...(source.body?.parts ?? []).map((text) => ({
+                  kind: "text" as const,
+                  text,
+                })),
+                ...(source.images ?? []).map((image) => {
+                  const asset = input.assets.get(image.assetPath);
+                  if (!asset)
+                    throw new Error(
+                      `verified source image is unavailable: ${image.assetPath}`,
+                    );
+                  return {
+                    kind: "image" as const,
+                    url: mediaAssetRoute(asset.sha256, asset.mediaType),
+                    alt: image.alt,
+                  };
+                }),
+              ],
+        ...(source.archive ? { archive: { ...source.archive } } : {}),
       }));
     },
     async listTopicOverviews() {

@@ -5,6 +5,56 @@ import { validatePublicationInput } from "../../src/content/adapters/publication
 import { writePublicationFixture } from "../support/publication-fixture";
 
 describe("validatePublicationInput", () => {
+  it("rejects a v2 source archive that omits required integrity evidence", async () => {
+    const fixture = await writePublicationFixture({
+      evidenceReadingContract: true,
+      omitRequiredArchiveEvidence: true,
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "invalid source input",
+    );
+  });
+
+  it.each(["empty-blocks", "empty-evidence"] as const)(
+    "rejects an insight with an invalid mechanism evidence contract: %s",
+    async (invalidMechanismContract) => {
+      const fixture = await writePublicationFixture({
+        evidenceReadingContract: true,
+        invalidMechanismContract,
+      });
+
+      await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+        "invalid insight input",
+      );
+    },
+  );
+
+  it("rejects citations that do not exactly match mechanism evidence", async () => {
+    const fixture = await writePublicationFixture({
+      evidenceReadingContract: true,
+      mismatchedCitationEvidence: true,
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "insight citation evidence mismatch",
+    );
+  });
+
+  it.each(["direction", "overflow", "unknown-type"] as const)(
+    "rejects an insight with an invalid related-reading contract: %s",
+    async (invalidRelationContract) => {
+      const fixture = await writePublicationFixture({
+        evidenceReadingContract: true,
+        invalidRelationContract,
+      });
+
+      await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+        "invalid insight input",
+      );
+    },
+  );
+
   it("returns a verified input for a complete, hash-bound publication", async () => {
     const fixture = await writePublicationFixture();
 

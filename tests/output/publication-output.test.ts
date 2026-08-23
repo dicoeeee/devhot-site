@@ -115,6 +115,31 @@ describe("publication output", () => {
     expect(metadata.routes).toContain("/model-research/topics/");
   });
 
+  it("copies and verifies a manifest-declared Mermaid SVG mechanism asset", async () => {
+    const fixture = await writePublicationFixture({
+      evidenceReadingContract: true,
+      mermaidMechanismContract: true,
+    });
+    const buildRoot = await prepareStaticBuild(fixture.root);
+    const svgDist = join(buildRoot, "dist");
+    await execFileAsync(
+      process.execPath,
+      [join(projectRoot, "node_modules", "astro", "bin", "astro.mjs"), "build"],
+      { cwd: buildRoot },
+    );
+    await copyDeclaredAssets({ inputRoot: fixture.root, distRoot: svgDist });
+
+    const metadata = await verifyDistribution({ distRoot: svgDist });
+
+    expect(metadata.assets).toContainEqual(
+      expect.objectContaining({
+        sha256: fixture.mermaidSha256,
+        mediaType: "image/svg+xml",
+        url: `/media/sha256/${fixture.mermaidSha256}.svg`,
+      }),
+    );
+  });
+
   it.each(["https://example.com/runtime.js", "//cdn.example/runtime.js"])(
     "rejects a page that introduces the third-party runtime asset %s",
     async (runtimeUrl) => {

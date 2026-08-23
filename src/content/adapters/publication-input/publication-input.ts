@@ -66,7 +66,7 @@ export type HomePublicationInput =
 export interface VerifiedAsset {
   readonly path: string;
   readonly fullPath: string;
-  readonly mediaType: "image/png";
+  readonly mediaType: "image/png" | "image/svg+xml";
   readonly sha256: string;
 }
 
@@ -76,7 +76,7 @@ export interface ContentDatePublicationInput {
 }
 
 export interface InsightPublicationInput {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly id: string;
   readonly sourceId: string;
   readonly domain: string;
@@ -89,6 +89,9 @@ export interface InsightPublicationInput {
     readonly blocks: readonly {
       readonly kind: "text" | "source_image" | "technical_flow_mermaid";
       readonly text: string;
+      readonly assetPath?: string;
+      readonly alt?: string;
+      readonly caption?: string;
       readonly evidenceRefs: readonly {
         readonly evidenceId: string;
         readonly quote: string;
@@ -105,27 +108,74 @@ export interface InsightPublicationInput {
   }[];
   readonly sourceUrl: string;
   readonly officialUrl: string;
+  readonly relations?: {
+    readonly deterministic: readonly {
+      readonly target:
+        | { readonly kind: "insight"; readonly id: string }
+        | { readonly kind: "source"; readonly id: string };
+      readonly relationType: PublicRelationType;
+      readonly direction: "undirected" | "outbound" | "inbound";
+      readonly basis: string;
+    }[];
+    readonly modelDerived: readonly {
+      readonly target:
+        | { readonly kind: "insight"; readonly id: string }
+        | { readonly kind: "source"; readonly id: string };
+      readonly relationType: ModelRelationType;
+      readonly direction: "undirected" | "outbound" | "inbound";
+      readonly explanation: string;
+    }[];
+  };
 }
 
 export interface SourceArchivePublicationInput {
-  readonly schemaVersion: 1;
+  readonly schemaVersion: 1 | 2;
   readonly id: string;
-  readonly insightId: string;
+  readonly insightId?: string;
   readonly source: { readonly id: string; readonly name: string };
   readonly title: string;
   readonly officialUrl: string;
   readonly contentDate: ContentDatePublicationInput;
-  readonly body: {
+  readonly body?: {
     readonly format: "markdown" | "pages";
     readonly parts: readonly string[];
   };
-  readonly images: readonly {
+  readonly images?: readonly {
     readonly assetPath: string;
     readonly alt: string;
     readonly position: number;
   }[];
-  readonly insightUrl: string;
+  readonly content?: readonly (
+    | { readonly kind: "text"; readonly text: string }
+    | {
+        readonly kind: "image";
+        readonly assetPath: string;
+        readonly alt: string;
+      }
+  )[];
+  readonly archive?: {
+    readonly status: "first_success_snapshot";
+    readonly archivedAt: string;
+    readonly contentSha256: string;
+    readonly completeness: "complete" | "partial";
+  };
+  readonly insightUrl?: string;
 }
+
+export type PublicRelationType =
+  | "same_object"
+  | "same_problem"
+  | "depends_on"
+  | "integrates_with"
+  | "alternative_to"
+  | "complements"
+  | "evolves_from"
+  | "implements";
+
+export type ModelRelationType = Exclude<
+  PublicRelationType,
+  "same_object" | "alternative_to" | "complements"
+>;
 
 export type TopicTagType = "domain" | "lifecycle" | "problem" | "method";
 
