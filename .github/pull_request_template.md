@@ -28,6 +28,9 @@ Refs dicoeeee/devhot#<number>
 - [ ] Standards code review 无未解决阻断项。
 - [ ] Spec code review 无未解决阻断项。
 - [ ] 跨仓 Draft PR 均已存在，候选预检使用完整远端 SHA 且没有 skip。
+- [ ] 离开 Draft 前已更新为 `ready`、`Merge blockers: none` 和最终成功预检 URL。
+- [ ] `edited` 事件的 `npm run gate` 已通过。
+- [ ] `ready_for_review` 事件的 `npm run gate` 已通过。
 
 ## Delivery evidence
 
@@ -38,6 +41,10 @@ Refs dicoeeee/devhot#<number>
 - Related repository SHA, if any:
 - Candidate preflight URL, if any:
 - PR gate URL:
+- Required Check context: `npm run gate`
+- `edited` gate URL:
+- `ready_for_review` gate URL:
+- Ruleset negative evidence, for governance Issues:
 - Merge SHA, after merge:
 - Main gate URL, after merge:
 

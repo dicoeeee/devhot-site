@@ -154,8 +154,10 @@ describe("repository pull request metadata gate", () => {
       "utf8",
     );
 
+    expect(workflow).toContain("- edited");
     expect(workflow).toContain("- ready_for_review");
     expect(workflow).toContain("- converted_to_draft");
+    expect(workflow).toContain("jobs:\n  gate:\n    name: npm run gate");
     expect(workflow).toContain("PR_IS_DRAFT:");
     expect(workflow).toContain("npx tsx tools/validate-pull-request.ts");
     expect(workflow.indexOf("Validate pull request metadata")).toBeLessThan(
