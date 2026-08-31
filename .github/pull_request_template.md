@@ -31,6 +31,7 @@ Refs dicoeeee/devhot#<number>
 - [ ] 离开 Draft 前已更新为 `ready`、`Merge blockers: none` 和最终成功预检 URL。
 - [ ] `edited` 事件的 `npm run gate` 已通过。
 - [ ] `ready_for_review` 事件的 `npm run gate` 已通过。
+- [ ] 用户已检视当前精确 SHA，并明确授权 Codex 执行本次合入。
 
 ## Delivery evidence
 
@@ -41,10 +42,13 @@ Refs dicoeeee/devhot#<number>
 - Related repository SHA, if any:
 - Candidate preflight URL, if any:
 - PR gate URL:
-- Required Check context: `npm run gate`
+- Stable PR gate context: `npm run gate`
 - `edited` gate URL:
 - `ready_for_review` gate URL:
-- Ruleset negative evidence, for governance Issues:
+- User-reviewed exact SHA:
+- Merge authorization:
+- Manual-control residual risk: no server-side Required Check; Actions provide detection
+  evidence only.
 - Merge SHA, after merge:
 - Main gate URL, after merge:
 
