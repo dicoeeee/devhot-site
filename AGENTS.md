@@ -44,6 +44,10 @@ npm run gate
   `ready`、`Merge blockers: none`，并记录成功的候选预检 Actions run URL。缺 counterpart
   PR、同名 Issue 分支、40 位 SHA 或仓库范围不一致时门禁失败；本仓作为消费者时不接受 producer
   counterpart 提前指向 `main`。
+- 离开 Draft 前先在 Draft 状态完成上述元数据更新，并等待 `edited` 事件的稳定 PR gate
+  `npm run gate` 通过；标记 Ready 后再等待 `ready_for_review`
+  事件的同名检查通过。当前人工补偿控制中，用户负责检视精确 SHA 并明确授权本次合入，Codex 负责重新核对元数据与门禁后触发 merge；GitHub 显示
+  `mergeable` 或 `CLEAN` 不能替代这些检查。
 
 ## 公开与凭据边界
 
