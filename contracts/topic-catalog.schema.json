@@ -1,18 +1,41 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://devhot.example/contracts/topic-catalog.schema.json",
-  "type": "object",
-  "additionalProperties": false,
-  "required": ["schemaVersion", "matchingRulesVersion", "topics"],
-  "properties": {
-    "schemaVersion": { "const": 1 },
-    "matchingRulesVersion": { "const": "same-type-or-cross-type-and-v1" },
-    "topics": {
-      "type": "array",
-      "minItems": 1,
-      "items": { "$ref": "#/$defs/topic" }
+  "oneOf": [
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "matchingRulesVersion", "topics"],
+      "properties": {
+        "schemaVersion": { "const": 1 },
+        "matchingRulesVersion": { "const": "same-type-or-cross-type-and-v1" },
+        "topics": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/topic" }
+        }
+      }
+    },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schemaVersion", "matchingRulesVersion", "topics", "tags"],
+      "properties": {
+        "schemaVersion": { "const": 2 },
+        "matchingRulesVersion": { "const": "same-type-or-cross-type-and-v1" },
+        "topics": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/topic" }
+        },
+        "tags": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/governedTag" }
+        }
+      }
     }
-  },
+  ],
   "$defs": {
     "editorialDomainId": {
       "enum": ["software-engineering", "model-research"]
@@ -33,6 +56,58 @@
           "items": {
             "type": "string",
             "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          }
+        }
+      }
+    },
+    "governedTag": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "type",
+        "name",
+        "definition",
+        "aliases",
+        "domains",
+        "relatedTopicIds",
+        "relatedInsightIds"
+      ],
+      "properties": {
+        "type": { "$ref": "#/$defs/tagType" },
+        "name": {
+          "type": "string",
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+        },
+        "definition": { "type": "string", "minLength": 1 },
+        "aliases": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "domains": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          }
+        },
+        "relatedTopicIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$"
+          }
+        },
+        "relatedInsightIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^insight-[a-f0-9]{24}$"
           }
         }
       }

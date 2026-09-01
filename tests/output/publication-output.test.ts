@@ -47,6 +47,17 @@ describe("publication output", () => {
                     : `/topics/${topic.id}/page/${index + 1}/`,
               ),
             ),
+            ...(input.topics.schemaVersion === 2
+              ? input.topics.tags.flatMap((tag) =>
+                  Array.from(
+                    { length: Math.max(1, Math.ceil(tag.relatedInsightIds.length / 5)) },
+                    (_, index) =>
+                      index === 0
+                        ? `/tags/${tag.type}/${tag.name}/`
+                        : `/tags/${tag.type}/${tag.name}/page/${index + 1}/`,
+                  ),
+                )
+              : []),
           ]
         : []),
     ].sort();

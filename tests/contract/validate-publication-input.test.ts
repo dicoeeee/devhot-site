@@ -97,6 +97,41 @@ describe("validatePublicationInput", () => {
     });
   });
 
+  it("accepts a v2 governed tag catalog with complete reverse references", async () => {
+    const fixture = await writePublicationFixture({ tagDetailContract: true });
+
+    const verified = await validatePublicationInput(fixture.root);
+
+    expect(verified.topics).toMatchObject({
+      schemaVersion: 2,
+      tags: expect.arrayContaining([
+        expect.objectContaining({
+          type: "domain",
+          name: "software-engineering",
+          domains: ["software-engineering"],
+        }),
+      ]),
+    });
+  });
+
+  it.each([
+    ["dangling-domain", "tag domain reference is unavailable"],
+    ["dangling-insight", "tag insight reference is unavailable"],
+    ["dangling-topic", "tag topic reference is unavailable"],
+    ["missing-reverse", "tag topic references are incomplete"],
+    ["unregistered-filter", "topic tag reference is unavailable"],
+  ] as const)(
+    "rejects an invalid governed tag graph: %s",
+    async (tagCatalogViolation, error) => {
+      const fixture = await writePublicationFixture({
+        tagDetailContract: true,
+        tagCatalogViolation,
+      });
+
+      await expect(validatePublicationInput(fixture.root)).rejects.toThrow(error);
+    },
+  );
+
   it("continues to accept the legacy extensible-domain home contract", async () => {
     const fixture = await writePublicationFixture({
       legacyHomeContract: true,

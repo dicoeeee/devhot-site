@@ -7,6 +7,9 @@ export const topicOverviewRoute = (domainId: string): string => `/${domainId}/to
 export const topicRoute = (id: string, topicPage = 1): string =>
   topicPage === 1 ? `/topics/${id}/` : `/topics/${id}/page/${topicPage}/`;
 
+export const tagRoute = (type: string, name: string, tagPage = 1): string =>
+  tagPage === 1 ? `/tags/${type}/${name}/` : `/tags/${type}/${name}/page/${tagPage}/`;
+
 export const topicTagAnchor = (type: string, name: string): string =>
   `tag-${type}-${name}`;
 

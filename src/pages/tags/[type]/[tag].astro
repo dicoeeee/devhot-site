@@ -1,0 +1,23 @@
+---
+import TagDetail from "../../../components/TagDetail.astro";
+import { createSiteContentRepository } from "../../../content/composition-root";
+import type { TagPage } from "../../../content/model/tag-page";
+
+export async function getStaticPaths() {
+  const pages = await (await createSiteContentRepository()).listTagPages();
+  return pages
+    .filter((page) => page.tagPage === 1)
+    .map((page) => ({
+      params: { type: page.type, tag: page.name },
+      props: { page },
+    }));
+}
+
+interface Props {
+  page: TagPage;
+}
+
+const { page } = Astro.props;
+---
+
+<TagDetail page={page} />

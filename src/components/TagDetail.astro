@@ -1,0 +1,118 @@
+---
+import { tagRoute } from "../content/model/site-routes";
+import type { TagPage } from "../content/model/tag-page";
+import SiteLayout from "../layouts/SiteLayout.astro";
+import EditorialHeader from "./EditorialHeader.astro";
+
+interface Props {
+  page: TagPage;
+}
+
+const { page } = Astro.props;
+const displayDate = (value: string): string => value.slice(0, 10).replaceAll("-", ".");
+const firstRelated = (page.tagPage - 1) * 5 + 1;
+const lastRelated = firstRelated + page.relatedInsights.length - 1;
+---
+
+<SiteLayout title={`${page.name} · DEVHOT`} canonicalPath={page.url}>
+  <EditorialHeader
+    brand={page.brand}
+    homeUrl={page.homeUrl}
+    topicsUrl={page.topicsUrl}
+    active="topics"
+  />
+  <main class="tag-detail-page">
+    <header class="tag-identity">
+      <div>
+        <p class="section-label">受控标签 · {page.type}</p>
+        <h1>{page.name}</h1>
+        <p class="tag-definition-copy">{page.definition}</p>
+      </div>
+      <dl class="tag-scope">
+        <div>
+          <dt>适用领域</dt>
+          <dd>{page.domains.map((domain) => <a href={domain.url}>{domain.name}</a>)}</dd>
+        </div>
+        <div>
+          <dt>别名</dt>
+          <dd>{page.aliases.length > 0 ? page.aliases.join("、") : "无"}</dd>
+        </div>
+      </dl>
+    </header>
+
+    {
+      page.relatedTopics.length > 0 ? (
+        <section class="tag-topics" aria-labelledby="tag-topics-title">
+          <header>
+            <p class="section-label">TOPIC CONNECTIONS</p>
+            <h2 id="tag-topics-title">相关主题</h2>
+            <span>{page.relatedTopics.length} 个主题</span>
+          </header>
+          <ol class="tag-topic-matrix">
+            {page.relatedTopics.map((topic, index) => (
+              <li>
+                <a href={topic.url}>
+                  <span>{String(index + 1).padStart(2, "0")}</span>
+                  <h3>{topic.name}</h3>
+                  <p>
+                    {topic.domains.join(" / ")} · {topic.memberCount} 篇
+                  </p>
+                  <strong>查看主题 ↗</strong>
+                </a>
+              </li>
+            ))}
+          </ol>
+        </section>
+      ) : null
+    }
+
+    <section class="tag-related" id="tag-insights" aria-labelledby="tag-related-title">
+      <header>
+        <div>
+          <p class="section-label">CURRENT MEMBERS</p>
+          <h2 id="tag-related-title">相关洞察</h2>
+        </div>
+        <p>当前共 {page.relatedInsightCount} 篇</p>
+      </header>
+      <ol class="topic-related-list" start={firstRelated}>
+        {
+          page.relatedInsights.map((insight, index) => (
+            <li data-related-insight={insight.id}>
+              <a href={insight.url}>
+                <span>{String(firstRelated + index).padStart(2, "0")}</span>
+                <article>
+                  <p>
+                    {insight.sourceName} · {displayDate(insight.contentDate.value)}
+                  </p>
+                  <h3>{insight.title}</h3>
+                  <p>{insight.summary}</p>
+                </article>
+              </a>
+            </li>
+          ))
+        }
+      </ol>
+      {
+        page.pageCount > 1 ? (
+          <nav class="topic-pagination" aria-label="相关洞察分页">
+            <p>
+              当前显示 {firstRelated}–{lastRelated} / 共 {page.relatedInsightCount} 篇
+            </p>
+            <div>
+              {Array.from({ length: page.pageCount }, (_, index) => index + 1).map(
+                (tagPage) => (
+                  <a
+                    href={`${tagRoute(page.type, page.name, tagPage)}#tag-insights`}
+                    aria-current={tagPage === page.tagPage ? "page" : undefined}
+                  >
+                    {String(tagPage).padStart(2, "0")}
+                  </a>
+                ),
+              )}
+            </div>
+          </nav>
+        ) : null
+      }
+    </section>
+  </main>
+</SiteLayout>
