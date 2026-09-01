@@ -1,0 +1,151 @@
+---
+import EditorialHeader from "../../components/EditorialHeader.astro";
+import { createSiteContentRepository } from "../../content/composition-root";
+import type { TimelineFragment, TimelinePage } from "../../content/model/timeline-page";
+import SiteLayout from "../../layouts/SiteLayout.astro";
+
+export async function getStaticPaths() {
+  const timelines = await (await createSiteContentRepository()).listTimelines();
+  if (timelines.length === 0) return [];
+  return [{ params: { path: undefined }, props: { timelines } }];
+}
+
+interface Props {
+  timelines: readonly TimelinePage[];
+}
+
+const { timelines } = Astro.props;
+const timeline =
+  timelines.find((candidate) => candidate.domain.id === "software-engineering") ??
+  timelines[0];
+if (!timeline) throw new Error("timeline input is unavailable");
+const initial = timeline.fragments.day[0];
+if (!initial) throw new Error("daily timeline input is unavailable");
+const config = {
+  defaultDomain: timeline.domain.id,
+  domains: timelines.map((candidate) => ({
+    id: candidate.domain.id,
+    name: candidate.domain.name,
+    homeUrl: candidate.domain.homeUrl,
+    scales: {
+      day: {
+        boundaries: candidate.fragments.day.map((fragment) => fragment.before),
+        firstUrl: candidate.fragments.day[0]?.url,
+      },
+      week: {
+        boundaries: candidate.fragments.week.map((fragment) => fragment.before),
+        firstUrl: candidate.fragments.week[0]?.url,
+      },
+    },
+  })),
+};
+const safeJson = (value: object) => JSON.stringify(value).replaceAll("<", "\\u003c");
+const groupTitle = (group: TimelineFragment["groups"][number]) =>
+  group.kind === "day" ? group.date : `${group.weekStart} — ${group.weekEnd}`;
+---
+
+<SiteLayout title="DEVHOT · 时间线" canonicalPath="/timeline/">
+  <EditorialHeader
+    brand={timeline.brand}
+    homeUrl={timeline.domain.homeUrl}
+    timelineUrl={`/timeline/?domain=${timeline.domain.id}&scale=day`}
+    topicsUrl={timeline.topicsUrl}
+    active="timeline"
+  />
+
+  <main
+    class="timeline-page"
+    data-timeline-root
+    data-domain={timeline.domain.id}
+    data-scale="day"
+  >
+    <header class="timeline-heading">
+      <p class="section-label">CURRENT INSIGHT TIMELINE</p>
+      <h1>洞察时间线</h1>
+      <p>按发布选择顺序阅读当前有效洞察；日周只是分组尺度。</p>
+    </header>
+
+    <section class="timeline-controls" aria-label="时间线阅读范围">
+      <nav data-timeline-domains aria-label="选择时间线领域">
+        {
+          timeline.availableDomains.map((domain) => (
+            <a
+              href={domain.url}
+              data-domain={domain.id}
+              aria-current={domain.id === timeline.domain.id ? "page" : undefined}
+            >
+              {domain.name}
+            </a>
+          ))
+        }
+      </nav>
+      <nav data-timeline-scales aria-label="选择时间线尺度">
+        <a
+          href={`/timeline/?domain=${timeline.domain.id}&scale=day`}
+          data-scale="day"
+          aria-current="page">按日</a
+        >
+        <a href={`/timeline/?domain=${timeline.domain.id}&scale=week`} data-scale="week"
+          >按周</a
+        >
+      </nav>
+    </section>
+
+    <p class="timeline-error" data-timeline-error hidden role="alert"></p>
+    <section class="timeline-stream" data-timeline-stream aria-live="polite">
+      {
+        initial.groups.map((group) => (
+          <section class="timeline-group" data-timeline-group>
+            <header>
+              <p>{group.kind === "day" ? "DAILY" : "WEEKLY"}</p>
+              <h2>{groupTitle(group)}</h2>
+            </header>
+            <ol>
+              {group.insights.map((insight) => (
+                <li data-timeline-insight={insight.id}>
+                  <a href={insight.url}>
+                    <p>
+                      <span>{insight.sourceName}</span>
+                      <em>{insight.statusLabel}</em>
+                    </p>
+                    <h3>{insight.title}</h3>
+                    <p>{insight.summary}</p>
+                  </a>
+                </li>
+              ))}
+            </ol>
+          </section>
+        ))
+      }
+    </section>
+    <button
+      class="timeline-more"
+      type="button"
+      data-timeline-more
+      hidden={!initial.hasMore}
+    >
+      查看更早洞察
+    </button>
+    <a
+      class="timeline-latest"
+      data-timeline-latest
+      hidden
+      href={`/timeline/?domain=${timeline.domain.id}&scale=day`}
+    >
+      返回当前领域最新时间线
+    </a>
+  </main>
+  <script
+    is:inline
+    type="application/json"
+    id="timeline-config"
+    set:html={safeJson(config)}
+  />
+  <script
+    is:inline
+    type="application/json"
+    id="timeline-initial"
+    set:html={safeJson(initial)}
+  />
+  <script is:inline src="/scripts/timeline.js" defer></script>
+</SiteLayout>

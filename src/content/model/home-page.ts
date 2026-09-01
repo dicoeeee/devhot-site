@@ -1,5 +1,6 @@
 interface HomePageBase {
   readonly topicsUrl?: string;
+  readonly timelineUrl?: string;
   readonly domain: {
     readonly id: string;
     readonly name: string;

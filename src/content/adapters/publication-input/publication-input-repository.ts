@@ -4,10 +4,19 @@ import {
   mediaAssetRoute,
   sourceArchiveRoute,
   tagRoute,
+  timelineFragmentRoute,
+  timelineRoute,
   topicOverviewRoute,
   topicRoute,
   topicTagAnchor,
 } from "../../model/site-routes";
+import type {
+  TimelineCard,
+  TimelineFragment,
+  TimelineGroup,
+  TimelinePage,
+  TimelineScale,
+} from "../../model/timeline-page";
 import type { SiteContentRepository } from "../../ports/site-content-repository";
 import type {
   EditorialDomainId,
@@ -85,6 +94,9 @@ export const createPublicationInputRepository = (
       return [
         {
           layout: "legacy",
+          ...(input.timeline
+            ? { timelineUrl: timelineRoute(home.domain.id, "day") }
+            : {}),
           ...(input.topics ? { topicsUrl: topicOverviewRoute(home.domain.id) } : {}),
           domain: { ...home.domain },
           isDefault: true,
@@ -101,6 +113,9 @@ export const createPublicationInputRepository = (
     }));
     return home.domains.map((domainHome) => ({
       layout: "editorial" as const,
+      ...(input.timeline
+        ? { timelineUrl: timelineRoute(domainHome.domain.id, "day") }
+        : {}),
       ...(input.topics ? { topicsUrl: topicOverviewRoute(domainHome.domain.id) } : {}),
       domain: { ...domainHome.domain },
       isDefault: domainHome.domain.id === home.defaultDomain,
@@ -275,6 +290,9 @@ export const createPublicationInputRepository = (
       return [
         {
           url: topicOverviewRoute(editorialDomainId),
+          ...(input.timeline
+            ? { timelineUrl: timelineRoute(editorialDomainId, "day") }
+            : {}),
           domain: {
             id: editorialDomainId,
             name: home.domain.name,
@@ -349,6 +367,7 @@ export const createPublicationInputRepository = (
           brand,
           homeUrl: topicDomains[0]?.url ?? "/",
           topicsUrl: topicOverviewRoute(primaryDomain),
+          ...(input.timeline ? { timelineUrl: timelineRoute(primaryDomain, "day") } : {}),
           tags: topicTagLinks(topic),
           currentMemberCount: related.length,
           ...(topic.latestConfirmedJudgment
@@ -429,11 +448,150 @@ export const createPublicationInputRepository = (
           brand,
           homeUrl: primaryDomain.url,
           topicsUrl: `${topicOverviewRoute(primaryDomain.id)}#${topicTagAnchor(tag.type, tag.name)}`,
+          ...(input.timeline
+            ? { timelineUrl: timelineRoute(primaryDomain.id, "day") }
+            : {}),
           relatedTopics,
           relatedInsightCount: relatedInsights.length,
           relatedInsights: relatedInsights.slice(index * 5, index * 5 + 5),
         };
       });
+    });
+  };
+
+  const timelineCard = (entry: {
+    readonly insightId: string;
+    readonly status: "new" | "updated";
+  }): TimelineCard => {
+    const insight = insightsById.get(entry.insightId);
+    const source = insight ? sourcesByInsightId.get(insight.id) : undefined;
+    if (!insight || !source) {
+      throw new Error(`verified timeline insight is unavailable: ${entry.insightId}`);
+    }
+    return {
+      id: insight.id,
+      url: insightRoute(insight.id),
+      sourceName: source.source.name,
+      status: entry.status,
+      statusLabel: entry.status === "new" ? "新发布" : "已更新",
+      title: insight.title,
+      summary: insight.summary,
+    };
+  };
+
+  const calendarDate = (value: string): Date => new Date(`${value}T00:00:00Z`);
+  const dateText = (value: Date): string => value.toISOString().slice(0, 10);
+  const moveDate = (value: Date, days: number): Date =>
+    new Date(value.getTime() + days * 24 * 60 * 60 * 1000);
+
+  const checkedFragment = (
+    domainId: EditorialDomainId,
+    scale: TimelineScale,
+    before: string,
+    nextBefore: string | undefined,
+    groups: readonly TimelineGroup[],
+  ): TimelineFragment => {
+    const insightCount = groups.reduce(
+      (total, group) => total + group.insights.length,
+      0,
+    );
+    const fragment = {
+      schemaVersion: 1 as const,
+      identity: `${domainId}:${scale}:${before}`,
+      domainId,
+      scale,
+      before,
+      ...(nextBefore ? { nextBefore } : {}),
+      hasMore: nextBefore !== undefined,
+      groups,
+      url: timelineFragmentRoute(domainId, scale, before),
+    };
+    const bytes = Buffer.byteLength(JSON.stringify(fragment));
+    const limit = scale === "day" ? 15 : 10;
+    if (insightCount > limit || bytes > 256 * 1024) {
+      throw new Error(
+        `timeline fragment limit exceeded: domain=${domainId} scale=${scale} before=${before} insights=${insightCount} bytes=${bytes}`,
+      );
+    }
+    return fragment;
+  };
+
+  const dailyFragments = (
+    domainId: EditorialDomainId,
+    days: NonNullable<typeof input.timeline>["domains"][number]["days"],
+  ): readonly TimelineFragment[] => {
+    const newest = calendarDate(days[0]!.date);
+    const oldest = calendarDate(days.at(-1)!.date);
+    const fragments: TimelineFragment[] = [];
+    for (
+      let windowEnd = newest;
+      windowEnd >= oldest;
+      windowEnd = moveDate(windowEnd, -5)
+    ) {
+      const windowStart = moveDate(windowEnd, -4);
+      const groups: TimelineGroup[] = days
+        .filter((group) => {
+          const candidate = calendarDate(group.date);
+          return candidate <= windowEnd && candidate >= windowStart;
+        })
+        .map((group) => ({
+          kind: "day" as const,
+          date: group.date,
+          insights: group.insights.map(timelineCard),
+        }));
+      const nextWindowEnd = moveDate(windowStart, -1);
+      const nextBefore =
+        nextWindowEnd >= oldest ? dateText(moveDate(nextWindowEnd, -4)) : undefined;
+      fragments.push(
+        checkedFragment(domainId, "day", dateText(windowStart), nextBefore, groups),
+      );
+    }
+    return fragments;
+  };
+
+  const weeklyFragments = (
+    domainId: EditorialDomainId,
+    weeks: NonNullable<typeof input.timeline>["domains"][number]["weeks"],
+  ): readonly TimelineFragment[] =>
+    weeks.map((group, index) =>
+      checkedFragment(domainId, "week", group.weekStart, weeks[index + 1]?.weekStart, [
+        {
+          kind: "week",
+          weekStart: group.weekStart,
+          weekEnd: group.weekEnd,
+          insights: group.insights.map(timelineCard),
+        },
+      ]),
+    );
+
+  const timelines = (): readonly TimelinePage[] => {
+    if (!input.timeline || input.home.schemaVersion !== 2) return [];
+    const homePages = homes();
+    return input.timeline.domains.map((timeline) => {
+      const home = homePages.find(
+        (candidate) => candidate.domain.id === timeline.domainId,
+      );
+      if (!home)
+        throw new Error(`verified timeline home is unavailable: ${timeline.domainId}`);
+      return {
+        url: "/timeline/" as const,
+        ...(home.topicsUrl ? { topicsUrl: home.topicsUrl } : {}),
+        domain: {
+          id: timeline.domainId,
+          name: home.domain.name,
+          homeUrl: home.domain.url,
+        },
+        availableDomains: homePages.map((candidate) => ({
+          id: candidate.domain.id as EditorialDomainId,
+          name: candidate.domain.name,
+          url: timelineRoute(candidate.domain.id, "day"),
+        })),
+        brand,
+        fragments: {
+          day: dailyFragments(timeline.domainId, timeline.days),
+          week: weeklyFragments(timeline.domainId, timeline.weeks),
+        },
+      };
     });
   };
 
@@ -524,6 +682,15 @@ export const createPublicationInputRepository = (
     },
     async listTagPages() {
       return tagPages();
+    },
+    async listTimelines() {
+      return timelines();
+    },
+    async listTimelineFragments() {
+      return timelines().flatMap((timeline) => [
+        ...timeline.fragments.day,
+        ...timeline.fragments.week,
+      ]);
     },
   };
 };

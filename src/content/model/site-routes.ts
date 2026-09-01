@@ -2,6 +2,15 @@ export const insightRoute = (id: string): string => `/insights/${id}/`;
 
 export const sourceArchiveRoute = (id: string): string => `/sources/${id}/`;
 
+export const timelineRoute = (domainId: string, scale: "day" | "week" = "day") =>
+  `/timeline/?domain=${domainId}&scale=${scale}`;
+
+export const timelineFragmentRoute = (
+  domainId: string,
+  scale: "day" | "week",
+  before: string,
+): string => `/timeline/fragments/${domainId}/${scale}/${before}.json`;
+
 export const topicOverviewRoute = (domainId: string): string => `/${domainId}/topics/`;
 
 export const topicRoute = (id: string, topicPage = 1): string =>

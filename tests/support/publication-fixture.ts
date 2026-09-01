@@ -40,6 +40,7 @@ interface PublicationFixtureOptions {
   readonly topicJudgment?: "confirmed" | "none";
   readonly topicJudgmentVersion?: number;
   readonly topicRuleViolation?: "duplicate-type" | "nested" | "not" | "member-mismatch";
+  readonly timelineViolation?: "invalid-date";
   readonly unreferencedAsset?: boolean;
   readonly unreferencedJson?: boolean;
   readonly weeklySourceCounts?: "duplicate" | "mismatch";
@@ -440,6 +441,7 @@ export const writePublicationFixture = async (
   const unreferencedJsonPath = "data/private-draft.json";
   const topicId = "reliable-agent-delivery";
   const topicPath = "data/topics.json";
+  const timelinePath = "data/timeline.json";
   const topicConditions = options.emptyTopic
     ? [{ tagType: "problem", anyOf: ["security"] }]
     : options.topicRuleViolation === "duplicate-type"
@@ -580,6 +582,54 @@ export const writePublicationFixture = async (
       },
     ],
   });
+  const timeline = JSON.stringify({
+    schemaVersion: 1,
+    timezone: "Asia/Shanghai",
+    domains: [
+      {
+        domainId: "software-engineering",
+        days: [
+          {
+            date:
+              options.timelineViolation === "invalid-date" ? "2026-02-31" : "2026-08-19",
+            insights: [{ insightId, status: "new" }],
+          },
+          {
+            date: "2026-08-13",
+            insights: [{ insightId, status: "updated" }],
+          },
+        ],
+        weeks: [
+          {
+            weekStart: "2026-08-10",
+            weekEnd: "2026-08-16",
+            insights: [{ insightId, status: "new" }],
+          },
+          {
+            weekStart: "2026-08-03",
+            weekEnd: "2026-08-09",
+            insights: [{ insightId, status: "updated" }],
+          },
+        ],
+      },
+      {
+        domainId: "model-research",
+        days: [
+          {
+            date: "2026-08-19",
+            insights: [{ insightId: modelInsightId, status: "updated" }],
+          },
+        ],
+        weeks: [
+          {
+            weekStart: "2026-08-10",
+            weekEnd: "2026-08-16",
+            insights: [{ insightId: modelInsightId, status: "updated" }],
+          },
+        ],
+      },
+    ],
+  });
 
   await mkdir(join(root, "data"), { recursive: true });
   await mkdir(join(root, "assets", "sha256"), { recursive: true });
@@ -589,6 +639,7 @@ export const writePublicationFixture = async (
   const includesTopics = !options.legacyHomeContract && !options.omitTopics;
   if (includesTopics) {
     await writeFile(join(root, topicPath), topics);
+    await writeFile(join(root, timelinePath), timeline);
   }
   await writeFile(join(root, insightPath), insight);
   await writeFile(join(root, modelInsightPath), modelInsight);
@@ -623,6 +674,7 @@ export const writePublicationFixture = async (
       ...(options.extraSourceReferencingInsight ? [extraSourcePath] : []),
     ],
     ...(includesTopics ? { topics: topicPath } : {}),
+    ...(includesTopics ? { timeline: timelinePath } : {}),
   };
   const files = [
     {
@@ -665,6 +717,11 @@ export const writePublicationFixture = async (
             path: topicPath,
             mediaType: "application/json" as const,
             sha256: sha256(topics),
+          },
+          {
+            path: timelinePath,
+            mediaType: "application/json" as const,
+            sha256: sha256(timeline),
           },
         ]
       : []),

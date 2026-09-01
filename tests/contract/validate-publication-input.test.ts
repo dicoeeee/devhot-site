@@ -258,6 +258,16 @@ describe("validatePublicationInput", () => {
     await expect(validatePublicationInput(fixture.root)).rejects.toThrow(error);
   });
 
+  it("rejects a syntactically shaped but impossible timeline calendar date", async () => {
+    const fixture = await writePublicationFixture({
+      timelineViolation: "invalid-date",
+    });
+
+    await expect(validatePublicationInput(fixture.root)).rejects.toThrow(
+      "invalid calendar date for software-engineering daily timeline: 2026-02-31",
+    );
+  });
+
   it.each([
     [{ invalidEditorialDomain: true }, "unknown domain"],
     [{ missingWeeklyOverview: true }, "missing frozen weekly overview"],

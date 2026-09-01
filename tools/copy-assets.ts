@@ -40,10 +40,11 @@ export const copyDeclaredAssets = async ({
 }: CopyDeclaredAssetsOptions): Promise<void> => {
   const input = await validatePublicationInput(inputRoot);
   const repository = createPublicationInputRepository(input);
-  const [topicOverviews, topicPages, tagPages] = await Promise.all([
+  const [topicOverviews, topicPages, tagPages, timelines] = await Promise.all([
     repository.listTopicOverviews(),
     repository.listTopicPages(),
     repository.listTagPages(),
+    repository.listTimelines(),
   ]);
   const mediaRoot = join(distRoot, "media", "sha256");
   await rm(join(distRoot, "media"), { recursive: true, force: true });
@@ -71,6 +72,7 @@ export const copyDeclaredAssets = async ({
       ...topicOverviews.map((overview) => overview.url),
       ...topicPages.map((page) => page.url),
       ...tagPages.map((page) => page.url),
+      ...(timelines.length > 0 ? ["/timeline/"] : []),
     ].sort(),
     assets: assets.map((asset) => ({
       url: mediaAssetRoute(asset.sha256, asset.mediaType),

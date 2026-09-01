@@ -62,6 +62,10 @@
         "topics": {
           "type": "string",
           "pattern": "^data/topics\\.json$"
+        },
+        "timeline": {
+          "type": "string",
+          "pattern": "^data/timeline\\.json$"
         }
       }
     },

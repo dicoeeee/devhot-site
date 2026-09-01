@@ -19,6 +19,7 @@ export interface TagPage {
   readonly brand: HomePage["brand"];
   readonly homeUrl: string;
   readonly topicsUrl: string;
+  readonly timelineUrl?: string;
   readonly relatedTopics: readonly {
     readonly id: string;
     readonly url: string;

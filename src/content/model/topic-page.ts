@@ -12,6 +12,7 @@ export interface TopicTagLink {
 
 export interface TopicOverviewPage {
   readonly url: string;
+  readonly timelineUrl?: string;
   readonly domain: {
     readonly id: EditorialDomainId;
     readonly name: string;
@@ -52,6 +53,7 @@ export interface TopicPage {
   readonly brand: HomePage["brand"];
   readonly homeUrl: string;
   readonly topicsUrl: string;
+  readonly timelineUrl?: string;
   readonly tags: readonly TopicTagLink[];
   readonly currentMemberCount: number;
   readonly latestConfirmedJudgment?: {
