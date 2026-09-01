@@ -30,6 +30,13 @@ interface PublicationFixtureOptions {
     "complete" | "cross-domain" | "duplicate" | "empty" | "overflow";
   readonly staleWeeklyRange?: boolean;
   readonly sourceFallbackRelation?: boolean;
+  readonly tagCatalogViolation?:
+    | "dangling-domain"
+    | "dangling-insight"
+    | "dangling-topic"
+    | "missing-reverse"
+    | "unregistered-filter";
+  readonly tagDetailContract?: boolean;
   readonly topicJudgment?: "confirmed" | "none";
   readonly topicJudgmentVersion?: number;
   readonly topicRuleViolation?: "duplicate-type" | "nested" | "not" | "member-mismatch";
@@ -38,14 +45,17 @@ interface PublicationFixtureOptions {
   readonly weeklySourceCounts?: "duplicate" | "mismatch";
 }
 
-const sha256 = (value: string): string =>
+const sha256 = (value: string | Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
 
 export const writePublicationFixture = async (
   options: PublicationFixtureOptions = {},
 ) => {
   const root = await mkdtemp(join(tmpdir(), "devhot-site-input-"));
-  const logo = "original-logo-bytes";
+  const logo = Buffer.from(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+    "base64",
+  );
   const logoSha256 = sha256(logo);
   const logoPath = `assets/sha256/${logoSha256}.png`;
   const mermaidSvg =
@@ -447,10 +457,85 @@ export const writePublicationFixture = async (
           ]
         : options.topicRuleViolation === "not"
           ? [{ tagType: "problem", anyOf: ["reliability"], not: ["security"] }]
-          : [{ tagType: "problem", anyOf: ["reliability"] }];
+          : [
+              {
+                tagType: "problem",
+                anyOf: [
+                  options.tagCatalogViolation === "unregistered-filter"
+                    ? "unregistered-tag"
+                    : "reliability",
+                ],
+              },
+            ];
+  const tagCatalog = options.tagDetailContract
+    ? [
+        {
+          type: "domain",
+          name: "software-engineering",
+          definition: "软件系统的设计、开发、测试、交付与维护。",
+          aliases: ["Software Engineering", "software engineering"],
+          domains: [
+            options.tagCatalogViolation === "dangling-domain"
+              ? "operations"
+              : "software-engineering",
+          ],
+          relatedTopicIds: [],
+          relatedInsightIds: [insightId],
+        },
+        {
+          type: "domain",
+          name: "model-research",
+          definition: "模型能力、训练、推理、评测及相关系统研究。",
+          aliases: ["Model Research", "model research"],
+          domains: ["model-research"],
+          relatedTopicIds: [],
+          relatedInsightIds: [modelInsightId],
+        },
+        {
+          type: "problem",
+          name: "reliability",
+          definition: "系统在预期条件下持续产生正确且可复核结果的能力。",
+          aliases: ["Reliability"],
+          domains: ["software-engineering", "model-research"],
+          relatedTopicIds:
+            options.tagCatalogViolation === "missing-reverse"
+              ? []
+              : [
+                  options.tagCatalogViolation === "dangling-topic"
+                    ? "missing-topic"
+                    : topicId,
+                ],
+          relatedInsightIds: [
+            insightId,
+            options.tagCatalogViolation === "dangling-insight"
+              ? "insight-000000000000000000000099"
+              : modelInsightId,
+          ],
+        },
+        {
+          type: "method",
+          name: "evaluation",
+          definition: "使用可复现任务、指标和样本测量模型或系统能力。",
+          aliases: ["Evaluation", "Evals", "evals"],
+          domains: ["software-engineering", "model-research"],
+          relatedTopicIds: ["evaluation-boundaries"],
+          relatedInsightIds: [modelInsightId],
+        },
+        {
+          type: "method",
+          name: "observability",
+          definition: "利用遥测信号理解系统内部状态和行为的方法。",
+          aliases: ["telemetry", "distributed tracing"],
+          domains: ["software-engineering"],
+          relatedTopicIds: [],
+          relatedInsightIds: [],
+        },
+      ]
+    : undefined;
   const topics = JSON.stringify({
-    schemaVersion: 1,
+    schemaVersion: options.tagDetailContract ? 2 : 1,
     matchingRulesVersion: "same-type-or-cross-type-and-v1",
+    ...(tagCatalog ? { tags: tagCatalog } : {}),
     topics: [
       {
         id: topicId,
@@ -638,7 +723,10 @@ export const writePublicationFixture = async (
       schemaVersion: 2,
       publicationId,
       candidate: { baselineSha, inputIdentity },
-      builderCompatibility: { min: "0.2.0", maxExclusive: "1.0.0" },
+      builderCompatibility: {
+        min: options.tagDetailContract ? "0.4.0" : "0.2.0",
+        maxExclusive: "1.0.0",
+      },
       entrypoints,
       files,
     }),

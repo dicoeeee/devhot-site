@@ -45,7 +45,7 @@ interface PublicationManifest {
   readonly files: readonly ManifestFile[];
 }
 
-const BUILDER_VERSION = "0.3.0";
+const BUILDER_VERSION = "0.4.0";
 const contractsRoot = join(process.cwd(), "contracts");
 
 const readJson = async (path: string): Promise<unknown> =>
@@ -355,6 +355,37 @@ export const validatePublicationInput = async (
       "topic identity",
     );
     const availableDomains = new Set(home.domains.map((item) => item.domain.id));
+    const governedTags =
+      topics.schemaVersion === 2
+        ? new Map(topics.tags.map((tag) => [`${tag.type}:${tag.name}`, tag]))
+        : undefined;
+    if (topics.schemaVersion === 2) {
+      assertUnique(
+        topics.tags.map((tag) => `${tag.type}:${tag.name}`),
+        "governed tag identity",
+      );
+      const topicIds = new Set(topics.topics.map((topic) => topic.id));
+      for (const tag of topics.tags) {
+        const identity = `${tag.type}:${tag.name}`;
+        if (tag.domains.some((domain) => !availableDomains.has(domain))) {
+          throw new Error(`tag domain reference is unavailable: ${identity}`);
+        }
+        if (tag.relatedTopicIds.some((topicId) => !topicIds.has(topicId))) {
+          throw new Error(`tag topic reference is unavailable: ${identity}`);
+        }
+        if (tag.relatedInsightIds.some((insightId) => !insightsById.has(insightId))) {
+          throw new Error(`tag insight reference is unavailable: ${identity}`);
+        }
+      }
+      for (const insight of insights) {
+        for (const tag of insight.tags) {
+          const identity = `${tag.type}:${tag.name}`;
+          if (!governedTags?.has(identity)) {
+            throw new Error(`insight tag reference is unavailable: ${identity}`);
+          }
+        }
+      }
+    }
     for (const topic of topics.topics) {
       const tagTypes = topic.tagFilters.map((filter) => filter.tagType);
       if (new Set(tagTypes).size !== tagTypes.length) {
@@ -364,6 +395,16 @@ export const validatePublicationInput = async (
       }
       if (topic.domains.some((domain) => !availableDomains.has(domain))) {
         throw new Error(`topic references an unavailable editorial domain: ${topic.id}`);
+      }
+      if (governedTags) {
+        for (const filter of topic.tagFilters) {
+          for (const name of filter.anyOf) {
+            const identity = `${filter.tagType}:${name}`;
+            if (!governedTags.has(identity)) {
+              throw new Error(`topic tag reference is unavailable: ${identity}`);
+            }
+          }
+        }
       }
       const expectedMembers = insights
         .filter((insight) => matchesTopic(insight, topic))
@@ -382,6 +423,36 @@ export const validatePublicationInput = async (
           judgment.evidence.dateFrom > judgment.evidence.dateTo
         ) {
           throw new Error(`invalid confirmed topic judgment: ${topic.id}`);
+        }
+      }
+    }
+    if (topics.schemaVersion === 2) {
+      for (const tag of topics.tags) {
+        const identity = `${tag.type}:${tag.name}`;
+        const expectedTopicIds = topics.topics
+          .filter((topic) =>
+            topic.tagFilters.some(
+              (filter) => filter.tagType === tag.type && filter.anyOf.includes(tag.name),
+            ),
+          )
+          .map((topic) => topic.id)
+          .sort();
+        if (expectedTopicIds.join("\n") !== [...tag.relatedTopicIds].sort().join("\n")) {
+          throw new Error(`tag topic references are incomplete: ${identity}`);
+        }
+        const expectedInsightIds = insights
+          .filter((insight) =>
+            insight.tags.some(
+              (insightTag) =>
+                insightTag.type === tag.type && insightTag.name === tag.name,
+            ),
+          )
+          .map((insight) => insight.id)
+          .sort();
+        if (
+          expectedInsightIds.join("\n") !== [...tag.relatedInsightIds].sort().join("\n")
+        ) {
+          throw new Error(`tag insight references are incomplete: ${identity}`);
         }
       }
     }

@@ -3,6 +3,7 @@ import {
   insightRoute,
   mediaAssetRoute,
   sourceArchiveRoute,
+  tagRoute,
   topicOverviewRoute,
   topicRoute,
   topicTagAnchor,
@@ -204,7 +205,6 @@ export const createPublicationInputRepository = (
   const topicTagLinks = (topic: NonNullable<typeof input.topics>["topics"][number]) => {
     const primaryDomain = topic.domains[0];
     if (!primaryDomain) throw new Error(`verified topic has no domain: ${topic.id}`);
-    const overviewUrl = topicOverviewRoute(primaryDomain);
     return topic.tagFilters.flatMap((filter) =>
       filter.anyOf.map((name) => {
         const anchorId = topicTagAnchor(filter.tagType, name);
@@ -212,7 +212,10 @@ export const createPublicationInputRepository = (
           type: filter.tagType,
           name,
           anchorId,
-          url: `${overviewUrl}#${anchorId}`,
+          url:
+            input.topics?.schemaVersion === 2
+              ? tagRoute(filter.tagType, name)
+              : `${topicOverviewRoute(primaryDomain)}#${anchorId}`,
         };
       }),
     );
@@ -245,14 +248,28 @@ export const createPublicationInputRepository = (
         topic.domains.includes(editorialDomainId),
       );
       const tagByIdentity = new Map<string, ReturnType<typeof topicTagLinks>[number]>();
-      for (const topic of topics) {
-        for (const tag of topicTagLinks(topic)) {
+      if (topicCatalog.schemaVersion === 2) {
+        for (const tag of topicCatalog.tags.filter((tag) =>
+          tag.domains.includes(editorialDomainId),
+        )) {
           const anchorId = topicTagAnchor(tag.type, tag.name);
           tagByIdentity.set(`${tag.type}:${tag.name}`, {
-            ...tag,
+            type: tag.type,
+            name: tag.name,
             anchorId,
-            url: `${topicOverviewRoute(editorialDomainId)}#${anchorId}`,
+            url: tagRoute(tag.type, tag.name),
           });
+        }
+      } else {
+        for (const topic of topics) {
+          for (const tag of topicTagLinks(topic)) {
+            const anchorId = topicTagAnchor(tag.type, tag.name);
+            tagByIdentity.set(`${tag.type}:${tag.name}`, {
+              ...tag,
+              anchorId,
+              url: `${topicOverviewRoute(editorialDomainId)}#${anchorId}`,
+            });
+          }
         }
       }
       return [
@@ -277,10 +294,7 @@ export const createPublicationInputRepository = (
               version: topic.version,
               name: topic.name,
               scope: topic.scope,
-              tags: topicTagLinks(topic).map((tag) => ({
-                ...tag,
-                url: `${topicOverviewRoute(editorialDomainId)}#${tag.anchorId}`,
-              })),
+              tags: topicTagLinks(topic),
               memberCount: members.length,
               latestMemberDate: members[0]?.contentDate.value ?? "",
             };
@@ -346,6 +360,78 @@ export const createPublicationInputRepository = (
               }
             : {}),
           relatedInsights: related.slice(index * 5, index * 5 + 5),
+        };
+      });
+    });
+  };
+
+  const tagPages = () => {
+    const catalog = input.topics;
+    if (!catalog || catalog.schemaVersion !== 2) return [];
+    const homePages = homes();
+    const domainsById = new Map(homePages.map((home) => [home.domain.id, home.domain]));
+    const topicsById = new Map(catalog.topics.map((topic) => [topic.id, topic]));
+    const projectedInsightsById = new Map(
+      insightPages().map((insight) => [insight.id, insight]),
+    );
+    return catalog.tags.flatMap((tag) => {
+      const tagDomains = tag.domains.map((id) => {
+        const domain = domainsById.get(id);
+        if (!domain) throw new Error(`verified tag domain is unavailable: ${id}`);
+        return { id, name: domain.name, url: domain.url };
+      });
+      const relatedTopics = tag.relatedTopicIds.map((id) => {
+        const topic = topicsById.get(id);
+        if (!topic) throw new Error(`verified tag topic is unavailable: ${id}`);
+        return {
+          id,
+          url: topicRoute(id),
+          name: topic.name,
+          domains: [...topic.domains],
+          memberCount: topic.currentMemberInsightIds.length,
+        };
+      });
+      const relatedInsights = tag.relatedInsightIds
+        .map((id) => {
+          const insight = projectedInsightsById.get(id);
+          const source = insight ? sourcesByInsightId.get(insight.id) : undefined;
+          if (!insight || !source) {
+            throw new Error(`verified tag insight is unavailable: ${id}`);
+          }
+          return {
+            id,
+            url: insight.url,
+            title: insight.title,
+            summary: insight.summary,
+            sourceName: source.source.name,
+            contentDate: { ...insight.contentDate },
+          };
+        })
+        .sort(
+          (left, right) =>
+            right.contentDate.value.localeCompare(left.contentDate.value) ||
+            left.id.localeCompare(right.id),
+        );
+      const pageCount = Math.max(1, Math.ceil(relatedInsights.length / 5));
+      return Array.from({ length: pageCount }, (_, index) => {
+        const tagPage = index + 1;
+        const primaryDomain = tagDomains[0];
+        if (!primaryDomain) throw new Error(`verified tag has no domain: ${tag.name}`);
+        return {
+          type: tag.type,
+          name: tag.name,
+          url: tagRoute(tag.type, tag.name, tagPage),
+          tagPage,
+          pageCount,
+          definition: tag.definition,
+          aliases: [...tag.aliases],
+          domains: tagDomains,
+          brand,
+          homeUrl: primaryDomain.url,
+          topicsUrl: `${topicOverviewRoute(primaryDomain.id)}#${topicTagAnchor(tag.type, tag.name)}`,
+          relatedTopics,
+          relatedInsightCount: relatedInsights.length,
+          relatedInsights: relatedInsights.slice(index * 5, index * 5 + 5),
         };
       });
     });
@@ -435,6 +521,9 @@ export const createPublicationInputRepository = (
     },
     async listTopicPages() {
       return topicPages();
+    },
+    async listTagPages() {
+      return tagPages();
     },
   };
 };

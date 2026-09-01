@@ -300,6 +300,110 @@ describe("SiteContentRepository", () => {
     });
   });
 
+  it("builds governed tag detail pages with four-column topic data and stable tag_page routes", async () => {
+    const fixture = await writePublicationFixture({ tagDetailContract: true });
+    const input = await validatePublicationInput(fixture.root);
+    if (!input.topics || input.topics.schemaVersion !== 2) {
+      throw new Error("expected governed tag fixture");
+    }
+    const base = input.insights[0];
+    const source = input.sources[0];
+    if (!base || !source) throw new Error("expected tag insight fixture");
+    const additionalInsights = Array.from({ length: 4 }, (_, index) => ({
+      ...base,
+      id: `insight-${String(index + 3).padStart(24, "0")}`,
+      sourceId: `source-${String(index + 3).padStart(24, "0")}`,
+      title: `Tag member ${index + 3}`,
+      contentDate: {
+        ...base.contentDate,
+        value: `2026-08-${String(16 - index).padStart(2, "0")}T08:00:00+00:00`,
+      },
+    }));
+    const insights = [...input.insights, ...additionalInsights];
+    const sources = [
+      ...input.sources,
+      ...additionalInsights.map((insight) => ({
+        ...source,
+        id: insight.sourceId,
+        insightId: insight.id,
+      })),
+    ];
+    const reliability = input.topics.tags.find(
+      (tag) => tag.type === "problem" && tag.name === "reliability",
+    );
+    if (!reliability) throw new Error("expected reliability tag");
+    const repository = createPublicationInputRepository({
+      ...input,
+      insights,
+      sources,
+      topics: {
+        ...input.topics,
+        tags: input.topics.tags.map((tag) =>
+          tag === reliability
+            ? {
+                ...tag,
+                relatedInsightIds: insights.map((insight) => insight.id),
+              }
+            : tag,
+        ),
+      },
+    });
+
+    const pages = await repository.listTagPages();
+    const overview = (await repository.listTopicOverviews())[0];
+    const tagPages = pages.filter(
+      (page) => page.type === "problem" && page.name === "reliability",
+    );
+    const emptyTagPage = pages.find(
+      (page) => page.type === "method" && page.name === "observability",
+    );
+
+    expect(
+      tagPages.map((page) => [page.tagPage, page.url, page.relatedInsights.length]),
+    ).toEqual([
+      [1, "/tags/problem/reliability/", 5],
+      [2, "/tags/problem/reliability/page/2/", 1],
+    ]);
+    expect(tagPages[0]).toMatchObject({
+      definition: "系统在预期条件下持续产生正确且可复核结果的能力。",
+      aliases: ["Reliability"],
+      domains: [
+        { id: "software-engineering", name: "软件工程" },
+        { id: "model-research", name: "模型研发" },
+      ],
+      relatedTopics: [
+        {
+          id: fixture.topicId,
+          url: `/topics/${fixture.topicId}/`,
+          name: "可靠 Agent 交付",
+          memberCount: 2,
+        },
+      ],
+    });
+    expect(overview?.tags).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: "domain",
+          name: "software-engineering",
+          url: "/tags/domain/software-engineering/",
+        }),
+        expect.objectContaining({
+          type: "problem",
+          name: "reliability",
+          url: "/tags/problem/reliability/",
+        }),
+      ]),
+    );
+    expect(emptyTagPage).toMatchObject({
+      url: "/tags/method/observability/",
+      tagPage: 1,
+      pageCount: 1,
+      relatedTopics: [],
+      relatedInsightCount: 0,
+      relatedInsights: [],
+    });
+  });
+
   it("fails fast when a verified topic member has no source identity", async () => {
     const fixture = await writePublicationFixture();
     const input = await validatePublicationInput(fixture.root);

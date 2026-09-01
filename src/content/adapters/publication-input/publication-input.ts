@@ -179,8 +179,7 @@ export type ModelRelationType = Exclude<
 
 export type TopicTagType = "domain" | "lifecycle" | "problem" | "method";
 
-export interface TopicCatalogPublicationInput {
-  readonly schemaVersion: 1;
+interface TopicCatalogBasePublicationInput {
   readonly matchingRulesVersion: "same-type-or-cross-type-and-v1";
   readonly topics: readonly {
     readonly id: string;
@@ -210,6 +209,25 @@ export interface TopicCatalogPublicationInput {
     };
   }[];
 }
+
+export interface GovernedTagPublicationInput {
+  readonly type: TopicTagType;
+  readonly name: string;
+  readonly definition: string;
+  readonly aliases: readonly string[];
+  readonly domains: readonly EditorialDomainId[];
+  readonly relatedTopicIds: readonly string[];
+  readonly relatedInsightIds: readonly string[];
+}
+
+export type TopicCatalogPublicationInput =
+  | (TopicCatalogBasePublicationInput & {
+      readonly schemaVersion: 1;
+    })
+  | (TopicCatalogBasePublicationInput & {
+      readonly schemaVersion: 2;
+      readonly tags: readonly GovernedTagPublicationInput[];
+    });
 
 export interface VerifiedPublicationInput {
   readonly root: string;
