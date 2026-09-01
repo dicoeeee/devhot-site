@@ -1,0 +1,69 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://devhot.example/contracts/timeline.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "timezone", "domains"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "timezone": { "const": "Asia/Shanghai" },
+    "domains": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["domainId", "days", "weeks"],
+        "properties": {
+          "domainId": { "enum": ["software-engineering", "model-research"] },
+          "days": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["date", "insights"],
+              "properties": {
+                "date": { "type": "string", "format": "date" },
+                "insights": { "$ref": "#/definitions/insights" }
+              }
+            }
+          },
+          "weeks": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["weekStart", "weekEnd", "insights"],
+              "properties": {
+                "weekStart": { "type": "string", "format": "date" },
+                "weekEnd": { "type": "string", "format": "date" },
+                "insights": { "$ref": "#/definitions/insights" }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "definitions": {
+    "insights": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["insightId", "status"],
+        "properties": {
+          "insightId": {
+            "type": "string",
+            "pattern": "^insight-[a-f0-9]{24}$"
+          },
+          "status": { "enum": ["new", "updated"] }
+        }
+      }
+    }
+  }
+}

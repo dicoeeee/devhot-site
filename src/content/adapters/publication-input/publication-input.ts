@@ -63,6 +63,29 @@ export interface EditorialHomePublicationInput {
 export type HomePublicationInput =
   LegacyHomePublicationInput | EditorialHomePublicationInput;
 
+export interface TimelinePublicationInput {
+  readonly schemaVersion: 1;
+  readonly timezone: "Asia/Shanghai";
+  readonly domains: readonly {
+    readonly domainId: EditorialDomainId;
+    readonly days: readonly {
+      readonly date: string;
+      readonly insights: readonly {
+        readonly insightId: string;
+        readonly status: "new" | "updated";
+      }[];
+    }[];
+    readonly weeks: readonly {
+      readonly weekStart: string;
+      readonly weekEnd: string;
+      readonly insights: readonly {
+        readonly insightId: string;
+        readonly status: "new" | "updated";
+      }[];
+    }[];
+  }[];
+}
+
 export interface VerifiedAsset {
   readonly path: string;
   readonly fullPath: string;
@@ -240,5 +263,6 @@ export interface VerifiedPublicationInput {
   readonly insights: readonly InsightPublicationInput[];
   readonly sources: readonly SourceArchivePublicationInput[];
   readonly topics?: TopicCatalogPublicationInput;
+  readonly timeline?: TimelinePublicationInput;
   readonly assets: ReadonlyMap<string, VerifiedAsset>;
 }

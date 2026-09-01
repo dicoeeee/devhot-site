@@ -56,8 +56,10 @@ describe("static editorial domain home", () => {
       /<a\b[^>]*data-reading-entry="timeline"[^>]*>/,
     )?.[0];
     const topicsEntry = software.match(/<a\b[^>]*data-reading-entry="topics"[^>]*>/)?.[0];
-    expect(timelineEntry).toContain('aria-disabled="true"');
-    expect(timelineEntry).not.toMatch(/\shref=/);
+    expect(timelineEntry).toContain(
+      'href="/timeline/?domain=software-engineering&amp;scale=day"',
+    );
+    expect(timelineEntry).not.toContain('aria-disabled="true"');
     expect(topicsEntry).toContain('href="/software-engineering/topics/"');
     expect(topicsEntry).not.toContain('aria-disabled="true"');
     expect(software).toContain("时间线");

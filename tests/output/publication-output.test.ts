@@ -60,6 +60,7 @@ describe("publication output", () => {
               : []),
           ]
         : []),
+      ...(input.timeline ? ["/timeline/"] : []),
     ].sort();
     const logo = input.assets.get(input.home.masthead.logoAssetPath);
     if (!logo) throw new Error("validated masthead logo is unavailable");

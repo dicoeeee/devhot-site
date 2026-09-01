@@ -14,6 +14,7 @@ import type {
   HomePublicationInput,
   InsightPublicationInput,
   SourceArchivePublicationInput,
+  TimelinePublicationInput,
   TopicCatalogPublicationInput,
   VerifiedAsset,
   VerifiedPublicationInput,
@@ -41,11 +42,12 @@ interface PublicationManifest {
     readonly insights: readonly string[];
     readonly sources: readonly string[];
     readonly topics?: string;
+    readonly timeline?: string;
   };
   readonly files: readonly ManifestFile[];
 }
 
-const BUILDER_VERSION = "0.4.0";
+const BUILDER_VERSION = "0.5.0";
 const contractsRoot = join(process.cwd(), "contracts");
 
 const readJson = async (path: string): Promise<unknown> =>
@@ -67,6 +69,14 @@ const compareVersion = (left: string, right: string): number => {
     if (difference !== 0) return difference;
   }
   return 0;
+};
+
+const parseCalendarDate = (value: string, label: string): number => {
+  const parsed = Date.parse(`${value}T00:00:00Z`);
+  if (!Number.isFinite(parsed) || new Date(parsed).toISOString().slice(0, 10) !== value) {
+    throw new Error(`invalid calendar date for ${label}: ${value}`);
+  }
+  return parsed;
 };
 
 const assertSafePath = (path: string): void => {
@@ -147,6 +157,9 @@ export const validatePublicationInput = async (
   );
   const validateTopics = ajv.compile<TopicCatalogPublicationInput>(
     await loadSchema<TopicCatalogPublicationInput>("topic-catalog.schema.json"),
+  );
+  const validateTimeline = ajv.compile<TimelinePublicationInput>(
+    await loadSchema<TimelinePublicationInput>("timeline.schema.json"),
   );
 
   const rawManifest = await readJson(join(root, "manifest.json"));
@@ -230,11 +243,15 @@ export const validatePublicationInput = async (
   if (manifest.entrypoints.topics) {
     declaredJson(manifest, manifest.entrypoints.topics, "topic entrypoint");
   }
+  if (manifest.entrypoints.timeline) {
+    declaredJson(manifest, manifest.entrypoints.timeline, "timeline entrypoint");
+  }
   const typedJsonPaths = [
     manifest.entrypoints.home,
     ...manifest.entrypoints.insights,
     ...manifest.entrypoints.sources,
     ...(manifest.entrypoints.topics ? [manifest.entrypoints.topics] : []),
+    ...(manifest.entrypoints.timeline ? [manifest.entrypoints.timeline] : []),
   ];
   assertUnique(typedJsonPaths, "typed JSON entrypoint");
   const declaredJsonPaths = manifest.files
@@ -269,6 +286,14 @@ export const validatePublicationInput = async (
         "topic catalog input",
       )
     : undefined;
+  const timeline = manifest.entrypoints.timeline
+    ? await validatedJson(
+        root,
+        manifest.entrypoints.timeline,
+        validateTimeline,
+        "timeline input",
+      )
+    : undefined;
   assertUnique(
     insights.map((insight) => insight.id),
     "insight identity",
@@ -287,6 +312,50 @@ export const validatePublicationInput = async (
 
   const sourcesById = new Map(sources.map((source) => [source.id, source]));
   const insightsById = new Map(insights.map((insight) => [insight.id, insight]));
+  if (timeline) {
+    const timelineDomainIds = timeline.domains.map((domain) => domain.domainId);
+    if (
+      new Set(timelineDomainIds).size !== 2 ||
+      !timelineDomainIds.includes("software-engineering") ||
+      !timelineDomainIds.includes("model-research")
+    ) {
+      throw new Error("timeline must contain both editorial domains exactly once");
+    }
+    for (const domain of timeline.domains) {
+      let previousDay: string | undefined;
+      for (const group of domain.days) {
+        parseCalendarDate(group.date, `${domain.domainId} daily timeline`);
+        if (previousDay && group.date >= previousDay) {
+          throw new Error(`timeline days must be newest first: ${domain.domainId}`);
+        }
+        previousDay = group.date;
+        validateTimelineReferences(domain.domainId, group.insights, insightsById);
+      }
+      let previousWeek: string | undefined;
+      for (const group of domain.weeks) {
+        const start = parseCalendarDate(
+          group.weekStart,
+          `${domain.domainId} weekly timeline start`,
+        );
+        const end = parseCalendarDate(
+          group.weekEnd,
+          `${domain.domainId} weekly timeline end`,
+        );
+        if (
+          !Number.isFinite(start) ||
+          !Number.isFinite(end) ||
+          new Date(start).getUTCDay() !== 1 ||
+          end - start !== 6 * 24 * 60 * 60 * 1000 ||
+          (previousWeek !== undefined && group.weekStart >= previousWeek) ||
+          group.insights.length > 10
+        ) {
+          throw new Error(`invalid complete timeline week: ${domain.domainId}`);
+        }
+        previousWeek = group.weekStart;
+        validateTimelineReferences(domain.domainId, group.insights, insightsById);
+      }
+    }
+  }
   if (home.schemaVersion === 2) {
     const domainIds = home.domains.map((domainHome) => domainHome.domain.id);
     if (!domainIds.includes(home.defaultDomain)) {
@@ -549,6 +618,25 @@ export const validatePublicationInput = async (
     insights: Object.freeze(insights),
     sources: Object.freeze(sources),
     ...(topics ? { topics: Object.freeze(topics) } : {}),
+    ...(timeline ? { timeline: Object.freeze(timeline) } : {}),
     assets,
   });
+};
+
+const validateTimelineReferences = (
+  domainId: TimelinePublicationInput["domains"][number]["domainId"],
+  entries: readonly { readonly insightId: string }[],
+  insightsById: ReadonlyMap<string, InsightPublicationInput>,
+): void => {
+  assertUnique(
+    entries.map((entry) => entry.insightId),
+    `timeline insight for ${domainId}`,
+  );
+  for (const entry of entries) {
+    const insight = insightsById.get(entry.insightId);
+    const domains = insight?.domains ?? (insight ? [insight.domain] : []);
+    if (!insight || !domains.includes(domainId)) {
+      throw new Error(`timeline insight/domain mismatch: ${domainId}/${entry.insightId}`);
+    }
+  }
 };

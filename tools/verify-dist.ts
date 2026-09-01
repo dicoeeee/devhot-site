@@ -105,6 +105,65 @@ export const verifyDistribution = async ({
 
   const routeSet = new Set(metadata.routes);
   const outputFileSet = new Set(outputFiles);
+  const timelineFragmentPaths = outputFiles.filter((path) =>
+    /^timeline\/fragments\/(?:software-engineering|model-research)\/(?:day|week)\/\d{4}-\d{2}-\d{2}\.json$/.test(
+      path,
+    ),
+  );
+  if (routeSet.has("/timeline/") && timelineFragmentPaths.length === 0) {
+    throw new Error("timeline route requires generated JSON fragments");
+  }
+  for (const path of timelineFragmentPaths) {
+    const content = await readFile(join(distRoot, path));
+    if (content.byteLength > 256 * 1024) {
+      throw new Error(`timeline fragment exceeds 256 KiB: ${path}`);
+    }
+    const match = path.match(
+      /^timeline\/fragments\/(software-engineering|model-research)\/(day|week)\/(\d{4}-\d{2}-\d{2})\.json$/,
+    );
+    const value = JSON.parse(content.toString("utf8")) as {
+      readonly schemaVersion?: unknown;
+      readonly identity?: unknown;
+      readonly domainId?: unknown;
+      readonly scale?: unknown;
+      readonly before?: unknown;
+      readonly groups?: unknown;
+    };
+    const domainId = match?.[1];
+    const scale = match?.[2];
+    const before = match?.[3];
+    if (
+      value.schemaVersion !== 1 ||
+      value.domainId !== domainId ||
+      value.scale !== scale ||
+      value.before !== before ||
+      value.identity !== `${domainId}:${scale}:${before}` ||
+      !Array.isArray(value.groups)
+    ) {
+      throw new Error(`timeline fragment identity mismatch: ${path}`);
+    }
+    for (const group of value.groups) {
+      if (
+        !group ||
+        typeof group !== "object" ||
+        !("insights" in group) ||
+        !Array.isArray(group.insights)
+      ) {
+        throw new Error(`timeline fragment group is invalid: ${path}`);
+      }
+      for (const insight of group.insights) {
+        if (
+          !insight ||
+          typeof insight !== "object" ||
+          !("url" in insight) ||
+          typeof insight.url !== "string" ||
+          !routeSet.has(insight.url)
+        ) {
+          throw new Error(`timeline fragment contains a broken insight route: ${path}`);
+        }
+      }
+    }
+  }
   for (const route of metadata.routes) {
     const htmlPath = routeToFile(distRoot, route);
     const html = await readFile(htmlPath, "utf8");
