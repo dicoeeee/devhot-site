@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { appendFile, cp, mkdtemp, readFile, rm } from "node:fs/promises";
+import { appendFile, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -167,4 +168,66 @@ describe("publication output", () => {
       );
     },
   );
+
+  it("publishes release metadata and desensitized maintenance JSON only", async () => {
+    const release = JSON.parse(
+      await readFile(join(distRoot, "release.json"), "utf8"),
+    ) as Record<string, unknown>;
+    const reminders = JSON.parse(
+      await readFile(join(distRoot, "maintenance", "reminders.json"), "utf8"),
+    ) as Record<string, unknown>;
+
+    expect(release).toMatchObject({
+      schemaVersion: 1,
+      publicationId: expectedPublicationId,
+    });
+    expect(typeof release["generatedAt"]).toBe("string");
+    expect(reminders).toEqual({ schemaVersion: 1, reminders: [] });
+    expect(existsSync(join(distRoot, "maintenance", "index.html"))).toBe(false);
+  });
+
+  it.each([
+    ['<div onclick="steal()">x</div>', "inline event handler attribute"],
+    ["<script>alert(1)</script>", "inline executable script"],
+    ["<style>body{}</style>", "inline style block"],
+    ['<div style="color:red">x</div>', "inline style attribute"],
+    [
+      "<script>navigator.serviceWorker.register('/sw.js')</script>",
+      "inline executable script",
+    ],
+  ])("rejects distribution HTML that contains %s", async (payload, expectedError) => {
+    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await appendFile(
+      join(tamperedDist, ...defaultDomainOutputSegments, "index.html"),
+      payload,
+    );
+
+    await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
+      expectedError,
+    );
+  });
+
+  it("rejects a release.json that drifts from the publication metadata", async () => {
+    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await writeFile(
+      join(tamperedDist, "release.json"),
+      `${JSON.stringify({ schemaVersion: 1, publicationId: "other", buildSha: "0".repeat(40), generatedAt: "2026-01-01T00:00:00Z" })}\n`,
+    );
+
+    await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
+      "release metadata is invalid",
+    );
+  });
+
+  it("rejects maintenance state that publishes reader HTML", async () => {
+    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await appendFile(join(tamperedDist, "maintenance", "index.html"), "<html></html>");
+
+    await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
+      "distribution HTML routes differ from publication metadata",
+    );
+  });
 });

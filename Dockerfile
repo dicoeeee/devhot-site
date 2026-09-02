@@ -6,4 +6,5 @@ COPY package.json package-lock.json .npmrc ./
 RUN npm ci
 
 COPY . .
+RUN npx playwright install --with-deps chromium firefox webkit
 RUN npm run gate

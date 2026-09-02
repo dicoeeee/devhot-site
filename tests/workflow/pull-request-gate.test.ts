@@ -164,4 +164,23 @@ describe("repository pull request metadata gate", () => {
       workflow.indexOf("Run the single repository gate"),
     );
   });
+
+  it("installs the pinned three-engine browser set after locked dependencies", async () => {
+    const workflow = await readFile(
+      join(process.cwd(), ".github", "workflows", "repository-gate.yml"),
+      "utf8",
+    );
+
+    const installIndex = workflow.indexOf("run: npm ci");
+    const browserIndex = workflow.indexOf("Install pinned browser engines");
+    const gateIndex = workflow.indexOf("Run the single repository gate");
+
+    expect(installIndex).toBeGreaterThan(0);
+    expect(browserIndex).toBeGreaterThan(installIndex);
+    expect(gateIndex).toBeGreaterThan(browserIndex);
+    expect(workflow).toContain(
+      "run: npx playwright install --with-deps chromium firefox webkit",
+    );
+    expect(workflow).toMatch(/^    timeout-minutes: 30$/m);
+  });
 });

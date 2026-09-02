@@ -24,12 +24,19 @@ root，生成按领域切换的编辑型首页、当前洞察详情与独立来�
 
 ```sh
 npm ci
+npx playwright install chromium firefox webkit
 npm run gate
 ```
 
 `npm run gate`
-依次执行输入验证、格式和严格类型检查、依赖方向检查、测试、完整静态构建、Manifest 白名单资源复制及
-`dist` 验证。任一步失败都会使门禁失败。
+依次执行输入验证、格式和严格类型检查、依赖方向检查、测试（含三引擎浏览器检查）、完整静态构建、Manifest 白名单资源复制、
+`dist` 验证及服务安全与缓存策略验证。任一步失败都会使门禁失败。
+
+浏览器检查使用锁定版本的 `@playwright/test`（Chromium 151.0.7922.34、Firefox 153.0、WebKit
+26.5）：Chromium 覆盖七类读者页面的完整主路径、键盘/鼠标/触摸等价交互、时间线返回恢复、失败重试与三种视口的无水平溢出；Firefox 与 WebKit 在桌面和手机视口执行核心smoke。构建目标固定为
+`chrome111 / edge111 / firefox114 / safari16.4`，不提供 legacy
+bundle。真实 Chrome、Edge 与 Safari 的人工验收清单见
+`docs/manual-browser-acceptance.md`；未执行的真实浏览器证据不冒充已通过。
 
 `npm run build` 复用同一输入与输出验证链，但不替代完整门禁。
 
@@ -95,3 +102,18 @@ binding 已发布，`package-lock.json` 固定其完整版本、下载地址和�
 `site-input/assets/sha256/73bc08f1…110c89.png`
 是 Devhot 受控透明 CIMC 原始标志的逐字节副本，SHA-256 为
 `73bc08f1a558271ed021a4f51fcc4a07d2850deea7cb592282ae0f9d5a110c89`。构建只按原长宽比显示，不重绘、不改色、不裁切、不拉伸。
+
+## 发布产物与安全基线
+
+完整构建在 `dist/` 中额外输出：
+
+- `release.json`：版本元数据（publicationId、buildSha、generatedAt），按重验证缓存策略提供。
+- `maintenance/reminders.json`：脱敏维护状态 JSON；维护状态只输出机器可读 JSON，不生成日报、周报、报告索引或维护 HTML 读者页面。
+- `_publication.json`：路由清单与内容寻址资源摘要，`npm run verify:dist`
+  验证路由集合、站内链接、资源哈希、无内联可执行脚本、无内联样式、无事件处理属性、无 Service
+  Worker 注册和无第三方运行时请求。
+
+`deploy/nginx-serving.conf`
+固化静态服务的安全响应头与缓存策略：仅允许自身资源的CSP、`nosniff`、`no-referrer`、拒绝 framing 的兼容头、`Permissions-Policy`，HTTP 阶段不发送 HSTS；HTML 与版本元数据重验证，`/media/sha256/`
+与 `/_astro/` 内容寻址资源长期 `immutable` 缓存。`npm run verify:serving`
+逐条验证该配置；后续部署包（#82–#84）必须原样挂载，不得在本文件之外改写安全头。

@@ -17,6 +17,18 @@ interface PublicationMetadata {
   }[];
 }
 
+interface ReleaseMetadata {
+  readonly schemaVersion: 1;
+  readonly publicationId: string;
+  readonly buildSha: string;
+  readonly generatedAt: string;
+}
+
+interface MaintenanceReminders {
+  readonly schemaVersion: 1;
+  readonly reminders: readonly unknown[];
+}
+
 interface VerifyDistributionOptions {
   readonly distRoot: string;
 }
@@ -78,6 +90,12 @@ export const verifyDistribution = async ({
   ) {
     throw new Error("the publication slice requires home, insight, and source routes");
   }
+  if (
+    !metadata.routes.some((route) => route.startsWith("/topics/")) ||
+    !metadata.routes.some((route) => route.endsWith("/topics/"))
+  ) {
+    throw new Error("the seven reader pages require topic routes");
+  }
   if (new Set(metadata.routes).size !== metadata.routes.length) {
     throw new Error("publication metadata contains duplicate routes");
   }
@@ -101,6 +119,68 @@ export const verifyDistribution = async ({
     ) {
       throw new Error(`external runtime dependency found in ${path}`);
     }
+    if (/\bon[a-z]+\s*=\s*["'][^"']*["']/i.test(source)) {
+      throw new Error(`inline event handler attribute found in ${path}`);
+    }
+    if (path.endsWith(".html")) {
+      for (const script of source.matchAll(/<script\b([^>]*)>([^<]*)<\/script>/gi)) {
+        const attributes = script[1] ?? "";
+        const body = (script[2] ?? "").trim();
+        const typeMatch = attributes.match(/\btype\s*=\s*["']([^"']+)["']/i);
+        const type = typeMatch?.[1]?.toLowerCase();
+        const executable =
+          type === undefined || type === "module" || type === "text/javascript";
+        if (executable && body.length > 0) {
+          throw new Error(`inline executable script found in ${path}`);
+        }
+        if (executable && !/\bsrc\s*=\s*["']\/[^"']*["']/i.test(attributes)) {
+          throw new Error(`script without a same-origin src found in ${path}`);
+        }
+      }
+      for (const style of source.matchAll(/<style\b([^>]*)>([\s\S]*?)<\/style>/gi)) {
+        if ((style[2] ?? "").trim().length > 0) {
+          throw new Error(`inline style block found in ${path}`);
+        }
+      }
+      if (/\bstyle\s*=\s*["'][^"']+["']/i.test(source)) {
+        throw new Error(`inline style attribute found in ${path}`);
+      }
+      if (/serviceWorker\s*\(/i.test(source)) {
+        throw new Error(`service worker registration found in ${path}`);
+      }
+    }
+  }
+
+  const release = JSON.parse(
+    await readFile(join(distRoot, "release.json"), "utf8"),
+  ) as unknown as Partial<ReleaseMetadata>;
+  if (
+    release.schemaVersion !== 1 ||
+    release.publicationId !== metadata.publicationId ||
+    release.buildSha !== metadata.buildSha ||
+    typeof release.generatedAt !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(
+      release.generatedAt,
+    )
+  ) {
+    throw new Error("release metadata is invalid or does not match the publication");
+  }
+
+  const reminders = JSON.parse(
+    await readFile(join(distRoot, "maintenance", "reminders.json"), "utf8"),
+  ) as unknown as Partial<MaintenanceReminders>;
+  if (reminders.schemaVersion !== 1 || !Array.isArray(reminders.reminders)) {
+    throw new Error("maintenance reminders metadata is invalid");
+  }
+  const maintenanceFiles = outputFiles.filter((path) => path.startsWith("maintenance/"));
+  if (maintenanceFiles.join("\n") !== "maintenance/reminders.json") {
+    throw new Error("maintenance status must only publish desensitized JSON");
+  }
+  const reportRoutes = metadata.routes.filter((route) =>
+    /\/(?:reports?|daily|weekly|admin)(?:\/|$)/.test(route),
+  );
+  if (reportRoutes.length > 0) {
+    throw new Error(`report or maintenance HTML routes are forbidden: ${reportRoutes}`);
   }
 
   const routeSet = new Set(metadata.routes);
