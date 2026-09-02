@@ -158,6 +158,8 @@ export const serveWithNginx = async (
     .replace("listen 8080;", `listen 127.0.0.1:${listenPort};`)
     .replace("include /etc/nginx/mime.types;", `include ${mimeTypes};`);
   const rendered = [
+    // 显式前台运行：spawn 管理的 child 就是真实 nginx master，stop() 才能可靠终止。
+    "daemon off;",
     `error_log ${join(configDir, "error.log")} crit;`,
     `pid ${join(configDir, "nginx.pid")};`,
     "events { }",
@@ -180,6 +182,52 @@ export const serveWithNginx = async (
     child.on("exit", () => resolvePromise()),
   );
 
+  const cleanup = async (): Promise<void> => {
+    if (child.exitCode === null && !child.killed) {
+      child.kill("SIGTERM");
+    }
+    await exited;
+    await rm(configDir, { recursive: true, force: true });
+  };
+
+  const STOP_TIMEOUT_MS = 10_000;
+
+  // stop()：SIGTERM 真实 master → 等待完整退出（有界超时）→ 确认端口不可连接 → 清理临时目录。
+  const stop = async (): Promise<void> => {
+    if (child.exitCode === null && !child.killed) {
+      child.kill("SIGTERM");
+    }
+    const exitedWithTimeout = await Promise.race([
+      exited.then(() => "exited" as const),
+      new Promise<"timeout">((resolvePromise) =>
+        setTimeout(() => resolvePromise("timeout"), STOP_TIMEOUT_MS).unref(),
+      ),
+    ]);
+    if (exitedWithTimeout === "timeout") {
+      throw new Error(
+        `pinned nginx master (pid ${child.pid}) did not exit within ${STOP_TIMEOUT_MS}ms of SIGTERM`,
+      );
+    }
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        const probe = await fetch(`http://127.0.0.1:${listenPort}/`, {
+          redirect: "manual",
+        });
+        await probe.arrayBuffer();
+        if (attempt === 99) {
+          throw new Error(
+            `pinned nginx port ${listenPort} is still reachable after the master exited`,
+          );
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      } catch (error) {
+        if ((error as Error).message.includes("still reachable")) throw error;
+        return; // fetch 被拒绝：端口已关闭。
+      }
+    }
+    await rm(configDir, { recursive: true, force: true });
+  };
+
   // 等待端口可连接。
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
@@ -191,8 +239,7 @@ export const serveWithNginx = async (
     } catch {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
       if (attempt === 99) {
-        child.kill("SIGTERM");
-        await exited;
+        await cleanup();
         throw new Error("pinned nginx did not become reachable");
       }
     }
@@ -200,10 +247,6 @@ export const serveWithNginx = async (
 
   return {
     origin: `http://127.0.0.1:${listenPort}`,
-    stop: async () => {
-      child.kill("SIGTERM");
-      await exited;
-      await rm(configDir, { recursive: true, force: true });
-    },
+    stop,
   };
 };

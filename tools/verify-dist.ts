@@ -219,15 +219,24 @@ const scanScriptSecurity = (source: string, path: string): void => {
   if (/serviceWorker\s*\.\s*register\s*\(/i.test(source)) {
     throw new Error(`service worker registration found in ${path}`);
   }
-  for (const match of source.matchAll(
-    /\b(?:fetch|import)\s*\(\s*(["'])((?:https?:)?\/\/[^"']*)\1/gi,
-  )) {
+  if (/\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i.test(source)) {
+    throw new Error(`inline event handler attribute found in ${path}`);
+  }
+  // 生成 JS 中不允许任何第三方 URL literal：fetch/import、sendBeacon、WebSocket、
+  // EventSource、XMLHttpRequest.open、Worker/SharedWorker 等连接 API 一旦携带
+  // http(s)/ws(s) 或协议相对 URL，都会被此条拒绝（站内相对路径不受影响）。
+  for (const match of source.matchAll(/(["'])((?:https?|wss?):\/\/[^"']*)\1/g)) {
     throw new Error(
       `external runtime dependency found in ${path}: ${match[1]}${match[2]}`,
     );
   }
-  if (/\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i.test(source)) {
-    throw new Error(`inline event handler attribute found in ${path}`);
+  for (const match of source.matchAll(/(["'])(\/\/[^"']+)\1/g)) {
+    throw new Error(
+      `external runtime dependency found in ${path}: ${match[1]}${match[2]}`,
+    );
+  }
+  for (const match of source.matchAll(/\bnew\s+(?:Worker|SharedWorker)\s*\(/gi)) {
+    throw new Error(`worker constructor found in ${path}`);
   }
 };
 

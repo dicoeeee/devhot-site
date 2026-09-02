@@ -154,3 +154,56 @@ describe("pinned nginx runtime security and cache policy", () => {
     expect(conditional.headers.get("cache-control")).toBe("no-cache, must-revalidate");
   });
 });
+
+describe("pinned nginx runtime process lifecycle", () => {
+  let build: Awaited<ReturnType<typeof buildReaderFixture>>;
+
+  beforeAll(async () => {
+    build = await buildReaderFixture();
+  }, 600_000);
+
+  afterAll(async () => {
+    await build.cleanup();
+  });
+
+  it("closes the listening port and terminates the real master on stop()", async () => {
+    const nginxBinary = await ensureNginxRuntime();
+    const port = await findFreePort();
+    const instance = await serveWithNginx(
+      nginxBinary,
+      build.distRoot,
+      join(projectRoot, "deploy", "nginx-serving.conf"),
+      join(projectRoot, "deploy", "security-headers.conf"),
+      port,
+    );
+
+    const beforeStop = await fetch(`${instance.origin}/release.json`);
+    expect(beforeStop.status).toBe(200);
+
+    await instance.stop();
+
+    // stop() 后端口必须不可连接（不能只验证启动成功）。
+    await expect(fetch(`${instance.origin}/release.json`)).rejects.toThrow();
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+    await expect(fetch(`${instance.origin}/release.json`)).rejects.toThrow();
+  });
+
+  it("leaves no nginx master processes behind after a full runtime suite", async () => {
+    // 上一项 stop() 后，不应存在本仓库固定运行时启动、且被 PID 1 接管的 master 残留。
+    const { execFile } = await import("node:child_process");
+    const promisified = await import("node:util");
+    const execFileAsync = promisified.promisify(execFile);
+    const { stdout } = (await execFileAsync("ps", ["-eo", "pid,ppid,command"])) as {
+      stdout: string;
+    };
+    const residual = stdout
+      .split("\n")
+      .filter(
+        (line) =>
+          line.includes("nginx: master process") &&
+          line.includes("devhot-nginx-1.30.4") &&
+          /^\s*\d+\s+1\s/.test(line),
+      );
+    expect(residual).toEqual([]);
+  });
+});
