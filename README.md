@@ -114,7 +114,16 @@ binding 已发布，`package-lock.json` 固定其完整版本、下载地址和�
   验证路由集合、站内链接、资源哈希、无内联可执行脚本、无内联样式、无事件处理属性、无 Service
   Worker 注册和无第三方运行时请求。
 
-`deploy/nginx-serving.conf`
+`deploy/nginx-serving.conf` 与 `deploy/security-headers.conf`
 固化静态服务的安全响应头与缓存策略：仅允许自身资源的CSP、`nosniff`、`no-referrer`、拒绝 framing 的兼容头、`Permissions-Policy`，HTTP 阶段不发送 HSTS；HTML 与版本元数据重验证，`/media/sha256/`
-与 `/_astro/` 内容寻址资源长期 `immutable` 缓存。`npm run verify:serving`
-逐条验证该配置；后续部署包（#82–#84）必须原样挂载，不得在本文件之外改写安全头。
+与 `/_astro/` 内容寻址资源长期 `immutable` 缓存。
+
+由于 Nginx 的 `add_header`
+在 location 内声明后不再继承 server 层，每个缓存 location 都重复
+`include deploy/security-headers.conf`； `npm run verify:serving`
+逐条验证该不变量。`tests/browser/nginx-runtime.test.ts`
+进一步用真实固定版本 Nginx（1.30.4，tarball
+SHA-256 固定，源码构建）启动完整产物并以真实 HTTP 请求验证：HTML、`release.json`、`_publication.json`、维护 JSON、时间线片段、内容寻址资源与 404 响应的安全头、缓存指令、条件请求 304，以及全程无 HSTS、无 HTTPS 重定向。后续部署包（#82–#84）必须原样挂载这两个配置文件，不得在本文件之外改写安全头。
+
+CSP 中 `connect-src 'self'` 用于时间线的同源意图加载（ADR 0242）；与 ADR 0222 首版
+`connect-src 'none'` 的字面冲突由治理 Issue dicoeeee/devhot#98 跟踪修订。

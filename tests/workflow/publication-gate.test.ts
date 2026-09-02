@@ -74,6 +74,9 @@ describe("publication-gate workflow", () => {
     expect(workflow.indexOf("Install pinned browser engines")).toBeGreaterThan(
       installIndex,
     );
+    expect(workflow.indexOf("Install Nginx build toolchain")).toBeGreaterThan(
+      workflow.indexOf("Install pinned browser engines"),
+    );
 
     const beforeBoundary = workflow.slice(0, boundaryIndex);
     expect(beforeBoundary).not.toMatch(/^\s+run:/m);
@@ -85,10 +88,10 @@ describe("publication-gate workflow", () => {
     }
   });
 
-  it("provides Git before repository fixture tests run", async () => {
+  it("provides Git and the Nginx build toolchain before repository fixture tests run", async () => {
     const workflow = await readFile(repositoryWorkflowPath, "utf8");
     const fixtureRuntimeInstallIndex = workflow.indexOf(
-      "run: apt-get update && apt-get install -y --no-install-recommends git",
+      "apt-get install -y --no-install-recommends git make gcc libc6-dev libssl-dev tar ca-certificates",
     );
     const dependencyInstallIndex = workflow.indexOf("run: npm ci");
     const repositoryGateIndex = workflow.indexOf("run: npm run gate");

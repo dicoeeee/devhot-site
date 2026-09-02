@@ -36,8 +36,10 @@ jobs:
       - name: Verify runtime version
         run: test "$(node --version)" = "v24.19.0"
 
-      - name: Install Git for repository fixtures
-        run: apt-get update && apt-get install -y --no-install-recommends git
+      - name: Install Git and build toolchain for repository fixtures
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git make gcc libc6-dev libssl-dev tar ca-certificates
 
       - name: Install locked dependencies
         run: npm ci

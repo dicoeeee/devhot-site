@@ -188,12 +188,46 @@ describe("publication output", () => {
 
   it.each([
     ['<div onclick="steal()">x</div>', "inline event handler attribute"],
+    ["<div onclick=steal()>x</div>", "inline event handler attribute"],
     ["<script>alert(1)</script>", "inline executable script"],
+    ["<script>if (1 < 2) alert(1)</script>", "inline executable script"],
     ["<style>body{}</style>", "inline style block"],
     ['<div style="color:red">x</div>', "inline style attribute"],
+    ["<div style=color:red>x</div>", "inline style attribute"],
+    [
+      '<link rel="stylesheet" href="https://example.com/runtime.css">',
+      "external runtime dependency",
+    ],
+    [
+      '<link rel="stylesheet" href="//cdn.example.com/runtime.css">',
+      "external runtime dependency",
+    ],
+    [
+      '<script src="https://example.com/runtime.js"></script>',
+      "external runtime dependency",
+    ],
+    ['<iframe src="https://example.com/frame"></iframe>', "external runtime dependency"],
+    [
+      '<object data="https://example.com/movie.swf"></object>',
+      "external runtime dependency",
+    ],
+    ['<video src="https://example.com/v.mp4"></video>', "external runtime dependency"],
+    ['<embed src="https://example.com/flash.swf">', "external runtime dependency"],
+    [
+      '<img src="/ok.png" srcset="https://cdn.example.com/x.png 2x">',
+      "external runtime dependency",
+    ],
+    [
+      '<link rel="modulepreload" href="https://cdn.example.com/m.js">',
+      "external runtime dependency",
+    ],
+    [
+      '<link rel="preload" as="font" href="https://cdn.example.com/f.woff2" crossorigin>',
+      "external runtime dependency",
+    ],
     [
       "<script>navigator.serviceWorker.register('/sw.js')</script>",
-      "service worker registration found in",
+      "inline executable script",
     ],
   ])("rejects distribution HTML that contains %s", async (payload, expectedError) => {
     const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));

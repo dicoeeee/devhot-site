@@ -1,28 +1,19 @@
 import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 interface VerifyServingOptions {
   readonly servingConfigPath: string;
 }
 
-const requiredSecurityHeaders: readonly {
-  readonly name: string;
-  readonly value: string;
-}[] = [
-  {
-    name: "Content-Security-Policy",
-    value:
-      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; base-uri 'none'",
-  },
-  { name: "X-Content-Type-Options", value: "nosniff" },
-  { name: "Referrer-Policy", value: "no-referrer" },
-  { name: "X-Frame-Options", value: "DENY" },
-  {
-    name: "Permissions-Policy",
-    value: "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
-  },
-];
+export const securityHeaders = {
+  "Content-Security-Policy":
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; base-uri 'none'",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+  "X-Frame-Options": "DENY",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+} as const;
 
 const revalidatePaths: readonly string[] = [
   "location / {",
@@ -46,12 +37,18 @@ const extractBlock = (config: string, header: string): string => {
   return config.slice(open + 1, close);
 };
 
+const headerLine = (name: string, value: string): string =>
+  `add_header ${name} "${value}" always;`;
+
 export const verifyServing = async ({
   servingConfigPath,
 }: VerifyServingOptions): Promise<void> => {
-  const config = await readFile(servingConfigPath, "utf8");
+  const configPath = resolve(servingConfigPath);
+  const config = await readFile(configPath, "utf8");
+  const headersPath = join(dirname(configPath), "security-headers.conf");
+  const headersConfig = await readFile(headersPath, "utf8");
 
-  if (!/^\s*listen 8080;$/m.test(config)) {
+  if (!/^\s*listen 8080;\s*$/m.test(config)) {
     throw new Error("serving config must listen on the unprivileged 8080 port");
   }
   if (/^\s*listen\s+80\s*;/m.test(config)) {
@@ -61,64 +58,93 @@ export const verifyServing = async ({
     throw new Error("serving config must not run as root");
   }
 
-  for (const { name, value } of requiredSecurityHeaders) {
-    const pattern = new RegExp(
-      `add_header ${name} "${value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}" always;`,
-    );
-    if (!pattern.test(config)) {
+  // 安全头集中在 security-headers.conf；serving config 中除 Cache-Control 外
+  // 不得再出现任何 add_header（安全头只能经 include 片段进入）。
+  for (const [name, value] of Object.entries(securityHeaders)) {
+    const line = headerLine(name, value);
+    if (!headersConfig.includes(line)) {
       throw new Error(`missing or altered security header: ${name}`);
     }
   }
-  if (/add_header\s+Strict-Transport-Security/i.test(config)) {
-    throw new Error("serving config must not send HSTS during the HTTP phase");
+  const strayHeaderPattern = /^\s*add_header\s+(?!Cache-Control)/gm;
+  for (const match of config.matchAll(strayHeaderPattern)) {
+    throw new Error(
+      `serving config must declare security headers only via the snippet: ${match[0].trim()}`,
+    );
   }
-  if (/(?:add_header|proxy_redirect|return\s+30\d)\s+[^;]*https:/i.test(config)) {
-    throw new Error("serving config must not redirect to HTTPS");
+  const snippetHeaderCount = headersConfig.match(/^\s*add_header\s+/gm)?.length ?? 0;
+  if (snippetHeaderCount !== Object.keys(securityHeaders).length) {
+    throw new Error("security headers snippet must declare exactly the governed headers");
   }
 
-  const headerNames = new Set(
-    [...config.matchAll(/^\s*add_header\s+([A-Za-z-]+)\s/gm)].map((match) => match[1]),
+  for (const source of [config, headersConfig]) {
+    if (/add_header\s+Strict-Transport-Security/i.test(source)) {
+      throw new Error("serving config must not send HSTS during the HTTP phase");
+    }
+    if (/(?:add_header|proxy_redirect|return\s+30\d)\s+[^;]*https:/i.test(source)) {
+      throw new Error("serving config must not redirect to HTTPS");
+    }
+  }
+
+  // add_header 继承规则：每个声明 Cache-Control 的 location 都必须重复
+  // include security-headers.conf，否则该 location 响应会丢失安全头。
+  const snippetInclude = "include deploy/security-headers.conf;";
+  if (!config.includes(snippetInclude)) {
+    throw new Error("serving config must include the security headers snippet");
+  }
+  // server 层兜底 include 必须存在且位于所有 location 之前（覆盖 404 等未命中路径）。
+  const serverIncludeCount =
+    config.match(/^\s{4}include deploy\/security-headers\.conf;$/m)?.length ?? 0;
+  const firstLocationIndex = config.search(/^\s*location/m);
+  const serverIncludeIndex = config.search(
+    /^\s{4}include deploy\/security-headers\.conf;$/m,
   );
-  const unexpected = [...headerNames].filter(
-    (name) =>
-      !requiredSecurityHeaders.some((header) => header.name === name) &&
-      name !== "Cache-Control",
-  );
-  if (unexpected.length > 0) {
-    throw new Error(`unexpected response headers declared: ${unexpected.join(", ")}`);
+  if (
+    serverIncludeCount < 1 ||
+    serverIncludeIndex < 0 ||
+    serverIncludeIndex > firstLocationIndex
+  ) {
+    throw new Error(
+      "serving config must include the security headers snippet at server level before any location",
+    );
   }
-
-  for (const path of revalidatePaths) {
-    const block = extractBlock(config, path);
-    if (!block.includes('add_header Cache-Control "no-cache, must-revalidate" always;')) {
-      throw new Error(`path must be served with revalidation: ${path}`);
-    }
-    if (/max-age=\d{4,}/.test(block)) {
-      throw new Error(`revalidated path must not gain a long freshness window: ${path}`);
-    }
-  }
-  for (const path of immutablePaths) {
-    const block = extractBlock(config, path);
-    if (
-      !block.includes(
-        'add_header Cache-Control "public, max-age=31536000, immutable" always;',
-      )
-    ) {
-      throw new Error(`content-addressed path must be cached immutably: ${path}`);
-    }
-  }
-
-  const locations = [...config.matchAll(/^\s*location[^\{]*\{/gm)].map((m) =>
+  const cacheLocations = [...config.matchAll(/^\s*location[^\{]*\{/gm)].map((m) =>
     m[0].trim(),
   );
   const knownLocations = [...revalidatePaths, ...immutablePaths];
-  for (const location of locations) {
+  if (cacheLocations.length !== knownLocations.length) {
+    throw new Error("serving config must declare exactly the governed location set");
+  }
+  for (const location of cacheLocations) {
     if (!knownLocations.includes(location)) {
       throw new Error(`undeclared location block in serving config: ${location}`);
     }
-  }
-  if (locations.length !== knownLocations.length) {
-    throw new Error("serving config must declare exactly the governed location set");
+    const block = extractBlock(config, location);
+    if (!block.includes(snippetInclude)) {
+      throw new Error(
+        `location must re-include the security headers snippet: ${location}`,
+      );
+    }
+    if (revalidatePaths.includes(location)) {
+      if (
+        !block.includes('add_header Cache-Control "no-cache, must-revalidate" always;')
+      ) {
+        throw new Error(`path must be served with revalidation: ${location}`);
+      }
+      if (/max-age=\d{4,}/.test(block)) {
+        throw new Error(
+          `revalidated path must not gain a long freshness window: ${location}`,
+        );
+      }
+    } else {
+      if (
+        !block.includes(
+          'add_header Cache-Control "public, max-age=31536000, immutable" always;',
+        )
+      ) {
+        throw new Error(`content-addressed path must be cached immutably: ${location}`);
+      }
+    }
   }
 };
 

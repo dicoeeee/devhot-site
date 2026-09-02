@@ -3,7 +3,12 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parse, type DefaultTreeAdapterMap } from "parse5";
+
 import { listSafeFiles } from "../src/infrastructure/list-safe-files";
+
+type Node = DefaultTreeAdapterMap["node"];
+type Element = DefaultTreeAdapterMap["element"];
 
 interface PublicationMetadata {
   readonly schemaVersion: 1;
@@ -77,6 +82,164 @@ const parseMetadata = (value: unknown): PublicationMetadata => {
   return metadata as PublicationMetadata;
 };
 
+// —— 结构化 HTML 安全扫描（parse5 真实解析，不依赖可绕过的局部正则） ——
+
+const EVENT_HANDLER_ATTRIBUTE = /^on[a-z]+$/i;
+
+const isExternalReference = (value: string): boolean =>
+  /^(?:https?:)?\/\//i.test(value.trim());
+
+const walk = (node: Node, visit: (element: Element) => void): void => {
+  if ("tagName" in node) {
+    visit(node as Element);
+  }
+  if ("childNodes" in node) {
+    for (const child of (node as Element).childNodes ?? []) {
+      walk(child, visit);
+    }
+  }
+};
+
+const textOf = (element: Element): string =>
+  (element.childNodes ?? [])
+    .filter(
+      (child): child is DefaultTreeAdapterMap["textNode"] => child.nodeName === "#text",
+    )
+    .map((child) => child.value)
+    .join("")
+    .trim();
+
+export const scanHtmlSecurity = (html: string, path: string): void => {
+  const document = parse(html, { sourceCodeLocationInfo: false });
+
+  walk(document, (element) => {
+    const tag = element.tagName.toLowerCase();
+    const attributes = new Map(element.attrs.map((attr) => [attr.name, attr.value]));
+
+    for (const attr of element.attrs) {
+      if (EVENT_HANDLER_ATTRIBUTE.test(attr.name)) {
+        throw new Error(
+          `inline event handler attribute found in ${path}: ${tag} ${attr.name}`,
+        );
+      }
+    }
+
+    // 内联样式：style 属性与 <style> 块都不允许。
+    if (attributes.has("style")) {
+      throw new Error(`inline style attribute found in ${path}: <${tag} style=…>`);
+    }
+    if (tag === "style" && textOf(element).length > 0) {
+      throw new Error(`inline style block found in ${path}`);
+    }
+
+    // 内联可执行脚本：type 缺省/module/text/javascript 且有正文即拒绝。
+    if (tag === "script") {
+      const type = attributes.get("type")?.toLowerCase();
+      const executable =
+        type === undefined ||
+        type === "module" ||
+        type === "text/javascript" ||
+        type === "application/javascript";
+      if (executable) {
+        const src = attributes.get("src");
+        if (src !== undefined && isExternalReference(src)) {
+          throw new Error(
+            `external runtime dependency found in ${path}: <script src="${src}">`,
+          );
+        }
+        if (textOf(element).length > 0) {
+          throw new Error(`inline executable script found in ${path}`);
+        }
+        if (src === undefined || !src.startsWith("/")) {
+          throw new Error(`script without a same-origin src found in ${path}`);
+        }
+      }
+    }
+
+    // 第三方运行时资源：引用外部 URL 的加载型元素一律拒绝。
+    const runtimeReferenceAttribute: Record<string, string> = {
+      script: "src",
+      img: "src",
+      source: "src",
+      video: "src",
+      audio: "src",
+      track: "src",
+      embed: "src",
+      iframe: "src",
+      object: "data",
+      link: "href",
+      use: "href",
+    };
+    const referenceAttribute = runtimeReferenceAttribute[tag];
+    if (referenceAttribute) {
+      const value = attributes.get(referenceAttribute);
+      if (value !== undefined && isExternalReference(value)) {
+        throw new Error(
+          `external runtime dependency found in ${path}: <${tag} ${referenceAttribute}="${value}">`,
+        );
+      }
+      if (tag === "link") {
+        const rel = attributes.get("rel")?.toLowerCase() ?? "";
+        const preloadLike = rel
+          .split(/\s+/)
+          .some((token) =>
+            [
+              "preload",
+              "modulepreload",
+              "prefetch",
+              "preconnect",
+              "dns-prefetch",
+            ].includes(token),
+          );
+        if (preloadLike) {
+          const href = attributes.get("href");
+          if (href === undefined || isExternalReference(href) || !href.startsWith("/")) {
+            throw new Error(`non-same-origin preload link found in ${path}: ${rel}`);
+          }
+        }
+      }
+    }
+    // srcset 上的外部引用同样拒绝。
+    for (const attr of element.attrs) {
+      if (attr.name === "srcset" || attr.name === "imagesrcset") {
+        const candidates = attr.value
+          .split(",")
+          .map((part) => part.trim().split(/\s+/)[0] ?? "");
+        if (candidates.some((candidate) => isExternalReference(candidate))) {
+          throw new Error(
+            `external runtime dependency found in ${path}: ${tag} ${attr.name}`,
+          );
+        }
+      }
+    }
+  });
+};
+
+const scanScriptSecurity = (source: string, path: string): void => {
+  if (/serviceWorker\s*\.\s*register\s*\(/i.test(source)) {
+    throw new Error(`service worker registration found in ${path}`);
+  }
+  for (const match of source.matchAll(
+    /\b(?:fetch|import)\s*\(\s*(["'])((?:https?:)?\/\/[^"']*)\1/gi,
+  )) {
+    throw new Error(
+      `external runtime dependency found in ${path}: ${match[1]}${match[2]}`,
+    );
+  }
+  if (/\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i.test(source)) {
+    throw new Error(`inline event handler attribute found in ${path}`);
+  }
+};
+
+const scanStyleSecurity = (source: string, path: string): void => {
+  if (/@import\s+(?:url\()?\s*(["']?)(?:https?:)?\/\//i.test(source)) {
+    throw new Error(`external runtime dependency found in ${path}`);
+  }
+  if (/url\s*\(\s*(["']?)(?:https?:)?\/\//i.test(source)) {
+    throw new Error(`external runtime dependency found in ${path}`);
+  }
+};
+
 export const verifyDistribution = async ({
   distRoot,
 }: VerifyDistributionOptions): Promise<PublicationMetadata> => {
@@ -112,42 +275,12 @@ export const verifyDistribution = async ({
     /\.(?:css|html|js)$/.test(candidate),
   )) {
     const source = await readFile(join(distRoot, path), "utf8");
-    if (
-      /\b(?:src|srcset)=["'](?:https?:)?\/\//i.test(source) ||
-      /\b(?:url|import)\s*\(\s*["']?(?:https?:)?\/\//i.test(source) ||
-      /\b(?:fetch|import)\s*\(\s*["'](?:https?:)?\/\//i.test(source)
-    ) {
-      throw new Error(`external runtime dependency found in ${path}`);
-    }
-    if (/\bon[a-z]+\s*=\s*["'][^"']*["']/i.test(source)) {
-      throw new Error(`inline event handler attribute found in ${path}`);
-    }
-    if (/serviceWorker\s*\.\s*register\s*\(/i.test(source)) {
-      throw new Error(`service worker registration found in ${path}`);
-    }
     if (path.endsWith(".html")) {
-      for (const script of source.matchAll(/<script\b([^>]*)>([^<]*)<\/script>/gi)) {
-        const attributes = script[1] ?? "";
-        const body = (script[2] ?? "").trim();
-        const typeMatch = attributes.match(/\btype\s*=\s*["']([^"']+)["']/i);
-        const type = typeMatch?.[1]?.toLowerCase();
-        const executable =
-          type === undefined || type === "module" || type === "text/javascript";
-        if (executable && body.length > 0) {
-          throw new Error(`inline executable script found in ${path}`);
-        }
-        if (executable && !/\bsrc\s*=\s*["']\/[^"']*["']/i.test(attributes)) {
-          throw new Error(`script without a same-origin src found in ${path}`);
-        }
-      }
-      for (const style of source.matchAll(/<style\b([^>]*)>([\s\S]*?)<\/style>/gi)) {
-        if ((style[2] ?? "").trim().length > 0) {
-          throw new Error(`inline style block found in ${path}`);
-        }
-      }
-      if (/\bstyle\s*=\s*["'][^"']+["']/i.test(source)) {
-        throw new Error(`inline style attribute found in ${path}`);
-      }
+      scanHtmlSecurity(source, path);
+    } else if (path.endsWith(".js")) {
+      scanScriptSecurity(source, path);
+    } else {
+      scanStyleSecurity(source, path);
     }
   }
 
