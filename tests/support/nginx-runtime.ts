@@ -109,6 +109,10 @@ export const ensureNginxRuntime = async (): Promise<string> => {
 
 export interface NginxServer {
   readonly origin: string;
+  /** 本实例 nginx master 的 PID（daemon off；由 spawn 直接管理）。 */
+  readonly masterPid: number | undefined;
+  /** 本实例创建的临时配置/dist 目录（stop() 成功后被删除）。 */
+  readonly configDir: string;
   stop(): Promise<void>;
 }
 
@@ -182,18 +186,15 @@ export const serveWithNginx = async (
     child.on("exit", () => resolvePromise()),
   );
 
-  const cleanup = async (): Promise<void> => {
-    if (child.exitCode === null && !child.killed) {
-      child.kill("SIGTERM");
-    }
-    await exited;
-    await rm(configDir, { recursive: true, force: true });
-  };
-
   const STOP_TIMEOUT_MS = 10_000;
 
-  // stop()：SIGTERM 真实 master → 等待完整退出（有界超时）→ 确认端口不可连接 → 清理临时目录。
-  const stop = async (): Promise<void> => {
+  // 统一清理路径（幂等，只执行一次）：SIGTERM master → 有界等待退出 →
+  // 端口必须不可连接 → 删除本次创建的 configDir。任何一步失败都抛出明确错误。
+  let cleanupDone = false;
+  const cleanupOnce = async (context: string): Promise<void> => {
+    if (cleanupDone) return;
+    cleanupDone = true;
+    const failures: string[] = [];
     if (child.exitCode === null && !child.killed) {
       child.kill("SIGTERM");
     }
@@ -204,31 +205,42 @@ export const serveWithNginx = async (
       ),
     ]);
     if (exitedWithTimeout === "timeout") {
-      throw new Error(
+      failures.push(
         `pinned nginx master (pid ${child.pid}) did not exit within ${STOP_TIMEOUT_MS}ms of SIGTERM`,
       );
     }
-    for (let attempt = 0; attempt < 100; attempt += 1) {
-      try {
-        const probe = await fetch(`http://127.0.0.1:${listenPort}/`, {
-          redirect: "manual",
-        });
-        await probe.arrayBuffer();
-        if (attempt === 99) {
-          throw new Error(
-            `pinned nginx port ${listenPort} is still reachable after the master exited`,
-          );
+    if (failures.length === 0) {
+      let reachable = false;
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        try {
+          const probe = await fetch(`http://127.0.0.1:${listenPort}/`, {
+            redirect: "manual",
+          });
+          await probe.arrayBuffer();
+          reachable = true;
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+        } catch {
+          reachable = false;
+          break;
         }
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-      } catch (error) {
-        if ((error as Error).message.includes("still reachable")) throw error;
-        return; // fetch 被拒绝：端口已关闭。
+      }
+      if (reachable) {
+        failures.push(
+          `pinned nginx port ${listenPort} is still reachable after the master exited`,
+        );
       }
     }
-    await rm(configDir, { recursive: true, force: true });
+    try {
+      await rm(configDir, { recursive: true, force: false });
+    } catch (error) {
+      failures.push(`failed to remove ${configDir}: ${(error as Error).message}`);
+    }
+    if (failures.length > 0) {
+      throw new Error(`nginx cleanup failed during ${context}: ${failures.join("; ")}`);
+    }
   };
 
-  // 等待端口可连接。
+  // 等待端口可连接；任何失败都走统一清理。
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const probe = await fetch(`http://127.0.0.1:${listenPort}/release.json`, {
@@ -239,7 +251,7 @@ export const serveWithNginx = async (
     } catch {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
       if (attempt === 99) {
-        await cleanup();
+        await cleanupOnce("startup").catch(() => {});
         throw new Error("pinned nginx did not become reachable");
       }
     }
@@ -247,6 +259,8 @@ export const serveWithNginx = async (
 
   return {
     origin: `http://127.0.0.1:${listenPort}`,
-    stop,
+    masterPid: child.pid,
+    configDir,
+    stop: () => cleanupOnce("stop"),
   };
 };

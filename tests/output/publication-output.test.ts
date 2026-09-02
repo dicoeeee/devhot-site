@@ -260,11 +260,18 @@ describe("publication output", () => {
     "\nconst socket = new WebSocket('wss://example.com/socket');\n",
     "\nconst source = new EventSource('https://example.com/stream');\n",
     "\nconst xhr = new XMLHttpRequest(); xhr.open('GET', 'https://example.com/api');\n",
-    "\nconst worker = new Worker('https://example.com/worker.js');\n",
     "\nconst shared = new SharedWorker('https://example.com/shared.js');\n",
     "\nfetch('//cdn.example.com/fragment');\n",
     "\nconst beacon = navigator.sendBeacon('http://example.com/track', 'y');\n",
     "\nconst ws = new WebSocket('ws://example.com/socket');\n",
+    "\nconst socket = new WebSocket(`wss://example.com/socket`);\n",
+    '\nnavigator.sendBeacon(`https://example.com/collect`, "x");\n',
+    "\nconst source = new EventSource(`https://example.com/stream`);\n",
+    "\nconst xhr = new XMLHttpRequest(); xhr.open('GET', `https://example.com/api`);\n",
+    "\nfetch(`HTTPS://EXAMPLE.COM/fragment`);\n",
+    "\nconst ws = new WebSocket('WSS://example.com/socket');\n",
+    "\nfetch(`//cdn.example.com/${'fragment'}`);\n",
+    "\nconst s = `https://example.com/${'a'}`;\n",
   ])(
     "rejects a distributed script that opens a third-party connection via %s",
     async (payload) => {
@@ -278,12 +285,27 @@ describe("publication output", () => {
     },
   );
 
+  it.each([
+    "\nconst worker = new Worker('https://example.com/worker.js');\n",
+    "\nconst worker = new Worker(`https://example.com/worker.js`);\n",
+    "\nconst worker = new Worker('/worker.js');\n",
+  ])("rejects a distributed script that constructs a Worker via %s", async (payload) => {
+    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await appendFile(join(tamperedDist, "scripts", "timeline.js"), payload);
+
+    await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
+      "worker constructor found in scripts/timeline.js",
+    );
+  });
+
   it("still allows same-origin relative URLs in distributed scripts", async () => {
     const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
     await cp(distRoot, tamperedDist, { recursive: true });
     await appendFile(
       join(tamperedDist, "scripts", "timeline.js"),
-      "\nfetch('/timeline/fragments/software-engineering/day/2026-08-30.json');\n",
+      "\nfetch('/timeline/fragments/software-engineering/day/2026-08-30.json');\n" +
+        "\nfetch(`/timeline/fragments/software-engineering/day/2026-08-30.json`);\n",
     );
 
     await expect(verifyDistribution({ distRoot: tamperedDist })).resolves.toEqual(

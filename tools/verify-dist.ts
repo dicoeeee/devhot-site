@@ -3,6 +3,7 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parse as parseScript, type Node as AcornNode } from "acorn";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 
 import { listSafeFiles } from "../src/infrastructure/list-safe-files";
@@ -215,28 +216,80 @@ export const scanHtmlSecurity = (html: string, path: string): void => {
   });
 };
 
+// 生成 JS 的第三方连接检查基于 AST（acorn）：
+// - StringLiteral、NoSubstitutionTemplateLiteral、可静态确定（全部 quasis、零表达式）
+//   的 TemplateExpression 都视为可静态检查的字符串值；
+// - 拒绝大小写不敏感的 http://、https://、ws://、wss:// 与协议相对 // 第三方 URL；
+// - 站内相对 URL（如 /timeline/fragments/...）不受影响；
+// - Worker/SharedWorker 构造一律拒绝（无论 URL 来源），并保留 service worker
+//   注册与内联事件处理属性的既有拒绝策略。
+const isExternalScriptUrl = (value: string): boolean =>
+  /^(?:https?|wss?):\/\//i.test(value) || value.startsWith("//");
+
+// 模板字符串按前缀判定：任一 quasi（含首个）以第三方 scheme 开头即拒绝，
+// 含 ${} 插值的模板无法静态证明其最终值，同样按前缀拒绝。
+const templateIsExternal = (node: AcornNode): string | undefined => {
+  const template = node as unknown as {
+    quasis?: { value: { cooked: string | null } }[];
+  };
+  for (const quasi of template.quasis ?? []) {
+    const cooked = quasi.value.cooked;
+    if (cooked !== null && isExternalScriptUrl(cooked)) return cooked;
+  }
+  return undefined;
+};
+
 const scanScriptSecurity = (source: string, path: string): void => {
+  let program: AcornNode;
+  try {
+    program = parseScript(source, { ecmaVersion: "latest" });
+  } catch {
+    // 产物 JS 必须可解析；解析失败本身即为门禁违规。
+    throw new Error(`distributed script is not parseable: ${path}`);
+  }
+
+  const visit = (node: AcornNode): void => {
+    const candidate = node as unknown as { type: string };
+    if (candidate.type === "Literal" || candidate.type === "TemplateLiteral") {
+      let offending: string | undefined;
+      if (candidate.type === "Literal") {
+        const value = (node as unknown as { value?: unknown }).value;
+        if (typeof value === "string" && isExternalScriptUrl(value)) offending = value;
+      } else {
+        offending = templateIsExternal(node);
+      }
+      if (offending !== undefined) {
+        throw new Error(`external runtime dependency found in ${path}: ${offending}`);
+      }
+    }
+    if (
+      candidate.type === "NewExpression" &&
+      (node as unknown as { callee: { name?: string } }).callee?.name === "Worker"
+    ) {
+      throw new Error(`worker constructor found in ${path}`);
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "type" || key === "start" || key === "end") continue;
+      const child = (node as unknown as Record<string, unknown>)[key];
+      if (Array.isArray(child)) {
+        for (const item of child) {
+          if (item && typeof item === "object" && "type" in item) {
+            visit(item as AcornNode);
+          }
+        }
+      } else if (child && typeof child === "object" && "type" in child) {
+        visit(child as AcornNode);
+      }
+    }
+  };
+  visit(program);
+
+  // AST 覆盖不了的兜底：内联事件处理属性（字符串形态）与 service worker 注册。
   if (/serviceWorker\s*\.\s*register\s*\(/i.test(source)) {
     throw new Error(`service worker registration found in ${path}`);
   }
   if (/\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i.test(source)) {
     throw new Error(`inline event handler attribute found in ${path}`);
-  }
-  // 生成 JS 中不允许任何第三方 URL literal：fetch/import、sendBeacon、WebSocket、
-  // EventSource、XMLHttpRequest.open、Worker/SharedWorker 等连接 API 一旦携带
-  // http(s)/ws(s) 或协议相对 URL，都会被此条拒绝（站内相对路径不受影响）。
-  for (const match of source.matchAll(/(["'])((?:https?|wss?):\/\/[^"']*)\1/g)) {
-    throw new Error(
-      `external runtime dependency found in ${path}: ${match[1]}${match[2]}`,
-    );
-  }
-  for (const match of source.matchAll(/(["'])(\/\/[^"']+)\1/g)) {
-    throw new Error(
-      `external runtime dependency found in ${path}: ${match[1]}${match[2]}`,
-    );
-  }
-  for (const match of source.matchAll(/\bnew\s+(?:Worker|SharedWorker)\s*\(/gi)) {
-    throw new Error(`worker constructor found in ${path}`);
   }
 };
 
