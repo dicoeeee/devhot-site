@@ -1,6 +1,15 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  readFile,
+  rename,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -128,7 +137,12 @@ export const serveWithNginx = async (
   listenPort: number,
 ): Promise<NginxServer> => {
   const configDir = join(tmpdir(), `devhot-nginx-conf-${process.pid}-${Date.now()}`);
-  await mkdir(configDir, { recursive: true });
+  await mkdir(configDir, { recursive: true, mode: 0o755 });
+  // mkdtemp 建立的 fixture 目录是 0700；nginx worker（nobody）无法遍历会产生 403。
+  // 把 dist 复制到 0755 的服务目录，供 worker 读取。
+  const serveRoot = join(configDir, "dist");
+  await cp(distRoot, serveRoot, { recursive: true });
+  await chmod(serveRoot, 0o755);
   const original = await readFile(servingConfigPath, "utf8");
   const headersTarget = join(configDir, "deploy", "security-headers.conf");
   await mkdir(dirname(headersTarget), { recursive: true });
@@ -140,7 +154,7 @@ export const serveWithNginx = async (
     "types { text/html html; text/css css; application/json json; image/png png; image/svg+xml svg; text/javascript js; }\n",
   );
   const renderedBody = original
-    .replace("root /usr/share/nginx/html;", `root ${distRoot};`)
+    .replace("root /usr/share/nginx/html;", `root ${serveRoot};`)
     .replace("listen 8080;", `listen 127.0.0.1:${listenPort};`)
     .replace("include /etc/nginx/mime.types;", `include ${mimeTypes};`);
   const rendered = [
