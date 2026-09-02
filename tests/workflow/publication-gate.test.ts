@@ -71,6 +71,9 @@ describe("publication-gate workflow", () => {
     expect(workflow.match(/^\s+run: npm ci$/gm)).toHaveLength(1);
     expect(workflow.match(/npm run gate/g)).toHaveLength(1);
     expect(workflow).toContain("repository-gate-failed");
+    expect(workflow.indexOf("Install pinned browser engines")).toBeGreaterThan(
+      installIndex,
+    );
 
     const beforeBoundary = workflow.slice(0, boundaryIndex);
     expect(beforeBoundary).not.toMatch(/^\s+run:/m);

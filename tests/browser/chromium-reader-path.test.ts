@@ -10,15 +10,13 @@ import {
 
 import {
   buildReaderFixture,
+  expectNoConsoleErrors,
+  expectNoRootHorizontalOverflow,
+  expectVisibleText,
   serveDistribution,
+  viewports,
   type StaticServer,
 } from "../support/browser-server";
-
-const viewports = {
-  mobile: { width: 375, height: 667 },
-  tablet: { width: 834, height: 1112 },
-  desktop: { width: 1280, height: 800 },
-} as const;
 
 let browser: Browser;
 
@@ -29,24 +27,6 @@ beforeAll(async () => {
 afterAll(async () => {
   await browser.close();
 });
-
-const expectNoRootHorizontalOverflow = async (page: Page): Promise<void> => {
-  const overflow = await page.evaluate(
-    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
-  );
-  expect(overflow).toBeLessThanOrEqual(0);
-};
-
-const expectNoConsoleErrors = (page: Page, errors: string[]): void => {
-  page.on("console", (message) => {
-    if (message.type() === "error") errors.push(message.text());
-  });
-  page.on("pageerror", (error) => errors.push(String(error)));
-};
-
-const expectVisibleText = async (page: Page, text: string): Promise<void> => {
-  await pwExpect(page.getByText(text, { exact: false }).first()).toBeVisible();
-};
 
 describe("Chromium full reader path", () => {
   let server: StaticServer;
@@ -139,6 +119,21 @@ describe("Chromium full reader path", () => {
     "keeps keyboard and touch interactions equivalent for the source coverage dialog",
     { timeout: 30_000 },
     async () => {
+      const touchContext = await browser.newContext({
+        viewport: viewports.mobile,
+        hasTouch: true,
+      });
+      const touchPage = await touchContext.newPage();
+      await touchPage.goto(`${server.origin}/software-engineering/`);
+      const touchDialog = touchPage.locator("dialog[data-source-coverage-dialog]");
+      const touchTrigger = touchPage.locator("[data-source-coverage-trigger]");
+      await touchTrigger.tap();
+      await pwExpect(touchDialog).toBeVisible();
+      await touchPage.locator("[data-source-coverage-close]").tap();
+      await pwExpect(touchDialog).toBeHidden();
+      await touchPage.close();
+      await touchContext.close();
+
       await page.goto(`${server.origin}/software-engineering/`);
       const dialog = page.locator("dialog[data-source-coverage-dialog]");
       const trigger = page.locator("[data-source-coverage-trigger]");
@@ -154,8 +149,7 @@ describe("Chromium full reader path", () => {
       await pwExpect(dialog).toBeHidden();
       await pwExpect(trigger).toBeFocused();
 
-      await trigger.dispatchEvent("touchstart");
-      await trigger.click({ force: true });
+      await trigger.click();
       await pwExpect(dialog).toBeVisible();
       await page.locator("[data-source-coverage-close]").click();
       await pwExpect(dialog).toBeHidden();
@@ -285,6 +279,18 @@ describe("Chromium responsive structure", () => {
           .locator(".brief-layout")
           .evaluate((node) => getComputedStyle(node).gridTemplateColumns);
         expect(columns.split(" ")[0]).toBe("280px");
+
+        const prose = await page.evaluate(() => {
+          const node = document.querySelector(".brief-article");
+          if (!node) return undefined;
+          const style = getComputedStyle(node);
+          return {
+            widthPx: node.getBoundingClientRect().width,
+            fontSize: parseFloat(style.fontSize),
+          };
+        });
+        if (!prose) throw new Error("insight prose column is unavailable");
+        expect(prose.widthPx / prose.fontSize).toBeLessThanOrEqual(76);
 
         const mainWidth = await page
           .locator("main")

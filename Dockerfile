@@ -3,8 +3,7 @@ FROM node:24.19.0-bookworm@sha256:4196d66a565c6f195728d9952f161f4adfe2ad753052a0
 WORKDIR /workspace
 
 COPY package.json package-lock.json .npmrc ./
-RUN npm ci
+RUN npm ci && npx playwright install --with-deps chromium firefox webkit
 
 COPY . .
-RUN npx playwright install --with-deps chromium firefox webkit
 RUN npm run gate

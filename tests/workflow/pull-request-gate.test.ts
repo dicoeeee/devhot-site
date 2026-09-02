@@ -183,4 +183,17 @@ describe("repository pull request metadata gate", () => {
     );
     expect(workflow).toMatch(/^    timeout-minutes: 30$/m);
   });
+
+  it("pins the browser floor as an explicit build target list", async () => {
+    const astroConfig = await readFile(join(process.cwd(), "astro.config.mjs"), "utf8");
+    const playwrightPackage = JSON.parse(
+      await readFile(join(process.cwd(), "package.json"), "utf8"),
+    ) as { readonly devDependencies?: Record<string, string> };
+
+    expect(astroConfig).toContain(
+      'target: ["chrome111", "edge111", "firefox114", "safari16.4"]',
+    );
+    expect(astroConfig).not.toMatch(/baseline-widely-available|esnext|modules/);
+    expect(playwrightPackage.devDependencies?.["@playwright/test"]).toMatch(/^\d/);
+  });
 });

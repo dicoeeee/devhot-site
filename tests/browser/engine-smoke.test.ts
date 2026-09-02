@@ -1,19 +1,18 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
-import { firefox, webkit, expect as pwExpect, type Browser } from "@playwright/test";
+import { firefox, webkit, type Browser } from "@playwright/test";
 
 import {
   buildReaderFixture,
+  expectNoConsoleErrors,
+  expectNoRootHorizontalOverflow,
+  expectVisibleText,
   serveDistribution,
+  viewports,
   type StaticServer,
 } from "../support/browser-server";
 
 const engines = [["Firefox", firefox] as const, ["WebKit", webkit] as const];
-
-const viewports = {
-  mobile: { width: 375, height: 667 },
-  desktop: { width: 1280, height: 800 },
-} as const;
 
 const routes = [
   { path: "/software-engineering/", text: "近期洞察" },
@@ -56,26 +55,18 @@ describe("Firefox and WebKit core smoke", () => {
 
   it.each(engines)(
     "%s renders the seven reader pages with navigation and content parity",
+    { timeout: 240_000 },
     async (name) => {
       const browser = browsers[name]!;
       const context = await browser.newContext({ viewport: viewports.desktop });
       const page = await context.newPage();
       const errors: string[] = [];
-      page.on("console", (message) => {
-        if (message.type() === "error") errors.push(message.text());
-      });
-      page.on("pageerror", (error) => errors.push(String(error)));
+      expectNoConsoleErrors(page, errors);
       try {
         for (const route of routes) {
           await page.goto(`${server.origin}${route.path}`);
-          await pwExpect(
-            page.getByText(route.text, { exact: false }).first(),
-          ).toBeVisible();
-          const overflow = await page.evaluate(
-            () =>
-              document.documentElement.scrollWidth - document.documentElement.clientWidth,
-          );
-          expect(overflow).toBeLessThanOrEqual(0);
+          await expectVisibleText(page, route.text);
+          await expectNoRootHorizontalOverflow(page);
         }
 
         await page.goto(`${server.origin}/software-engineering/`);
@@ -87,7 +78,7 @@ describe("Firefox and WebKit core smoke", () => {
         const more = page.locator("[data-timeline-more]");
         await more.click();
         await page.waitForURL(/before=/);
-        await pwExpect
+        await expect
           .poll(() => page.locator("[data-timeline-group]").count())
           .toBeGreaterThan(1);
         await page.goBack();
@@ -99,28 +90,21 @@ describe("Firefox and WebKit core smoke", () => {
         await context.close();
       }
     },
-    240_000,
   );
 
   it.each(engines)(
     "%s keeps the mobile viewport free of root horizontal overflow",
+    { timeout: 240_000 },
     async (name) => {
       const browser = browsers[name]!;
       const context = await browser.newContext({ viewport: viewports.mobile });
       const page = await context.newPage();
       const errors: string[] = [];
-      page.on("console", (message) => {
-        if (message.type() === "error") errors.push(message.text());
-      });
-      page.on("pageerror", (error) => errors.push(String(error)));
+      expectNoConsoleErrors(page, errors);
       try {
         for (const route of routes) {
           await page.goto(`${server.origin}${route.path}`);
-          const overflow = await page.evaluate(
-            () =>
-              document.documentElement.scrollWidth - document.documentElement.clientWidth,
-          );
-          expect(overflow).toBeLessThanOrEqual(0);
+          await expectNoRootHorizontalOverflow(page);
         }
         expect(errors).toEqual([]);
       } finally {
@@ -128,6 +112,5 @@ describe("Firefox and WebKit core smoke", () => {
         await context.close();
       }
     },
-    240_000,
   );
 });

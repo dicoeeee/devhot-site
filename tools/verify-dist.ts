@@ -122,6 +122,9 @@ export const verifyDistribution = async ({
     if (/\bon[a-z]+\s*=\s*["'][^"']*["']/i.test(source)) {
       throw new Error(`inline event handler attribute found in ${path}`);
     }
+    if (/serviceWorker\s*\.\s*register\s*\(/i.test(source)) {
+      throw new Error(`service worker registration found in ${path}`);
+    }
     if (path.endsWith(".html")) {
       for (const script of source.matchAll(/<script\b([^>]*)>([^<]*)<\/script>/gi)) {
         const attributes = script[1] ?? "";
@@ -144,9 +147,6 @@ export const verifyDistribution = async ({
       }
       if (/\bstyle\s*=\s*["'][^"']+["']/i.test(source)) {
         throw new Error(`inline style attribute found in ${path}`);
-      }
-      if (/serviceWorker\s*\(/i.test(source)) {
-        throw new Error(`service worker registration found in ${path}`);
       }
     }
   }

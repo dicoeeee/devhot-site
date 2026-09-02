@@ -13,7 +13,7 @@ const requiredSecurityHeaders: readonly {
   {
     name: "Content-Security-Policy",
     value:
-      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; media-src 'self'; connect-src 'none'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; base-uri 'none'",
+      "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; base-uri 'none'",
   },
   { name: "X-Content-Type-Options", value: "nosniff" },
   { name: "Referrer-Policy", value: "no-referrer" },

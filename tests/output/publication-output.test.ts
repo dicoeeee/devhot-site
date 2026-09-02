@@ -193,7 +193,7 @@ describe("publication output", () => {
     ['<div style="color:red">x</div>', "inline style attribute"],
     [
       "<script>navigator.serviceWorker.register('/sw.js')</script>",
-      "inline executable script",
+      "service worker registration found in",
     ],
   ])("rejects distribution HTML that contains %s", async (payload, expectedError) => {
     const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
@@ -205,6 +205,19 @@ describe("publication output", () => {
 
     await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
       expectedError,
+    );
+  });
+
+  it("rejects a distributed script that registers a service worker", async () => {
+    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await appendFile(
+      join(tamperedDist, "scripts", "timeline.js"),
+      "\nnavigator.serviceWorker.register('/offline.js');\n",
+    );
+
+    await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
+      "service worker registration found in scripts/timeline.js",
     );
   });
 

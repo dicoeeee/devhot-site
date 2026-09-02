@@ -1,11 +1,37 @@
 import { spawn } from "node:child_process";
-import { rm } from "node:fs/promises";
+import { readFile, rm, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 import { createServer, type Server } from "node:http";
-import { readFile, stat } from "node:fs/promises";
+
+import { expect } from "vitest";
+import { expect as pwExpect, type Page } from "@playwright/test";
 
 const projectRoot = process.cwd();
+
+export const viewports = {
+  mobile: { width: 375, height: 667 },
+  tablet: { width: 834, height: 1112 },
+  desktop: { width: 1280, height: 800 },
+} as const;
+
+export const expectNoRootHorizontalOverflow = async (page: Page): Promise<void> => {
+  const overflow = await page.evaluate(
+    () => document.documentElement.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(overflow).toBeLessThanOrEqual(0);
+};
+
+export const expectNoConsoleErrors = (page: Page, errors: string[]): void => {
+  page.on("console", (message) => {
+    if (message.type() === "error") errors.push(message.text());
+  });
+  page.on("pageerror", (error) => errors.push(String(error)));
+};
+
+export const expectVisibleText = async (page: Page, text: string): Promise<void> => {
+  await pwExpect(page.getByText(text, { exact: false }).first()).toBeVisible();
+};
 
 const contentTypeFor = (path: string): string => {
   if (path.endsWith(".html")) return "text/html; charset=utf-8";
@@ -16,6 +42,15 @@ const contentTypeFor = (path: string): string => {
   if (path.endsWith(".svg")) return "image/svg+xml";
   return "application/octet-stream";
 };
+
+export const securityHeaders = {
+  "Content-Security-Policy":
+    "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; media-src 'self'; connect-src 'self'; object-src 'none'; frame-src 'none'; frame-ancestors 'none'; form-action 'none'; worker-src 'none'; base-uri 'none'",
+  "X-Content-Type-Options": "nosniff",
+  "Referrer-Policy": "no-referrer",
+  "X-Frame-Options": "DENY",
+  "Permissions-Policy": "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
+} as const;
 
 export interface StaticServer {
   readonly origin: string;
@@ -34,20 +69,28 @@ export const serveDistribution = async (distRoot: string): Promise<StaticServer>
         fileStat = await stat(join(distRoot, filePath.slice(1))).catch(() => null);
       }
       if (!fileStat?.isFile()) {
-        response.writeHead(404, { "Content-Type": "text/plain; charset=utf-8" });
+        response.writeHead(404, {
+          "Content-Type": "text/plain; charset=utf-8",
+          ...securityHeaders,
+        });
         response.end("not found");
         return;
       }
       const body = await readFile(join(distRoot, filePath.slice(1)));
       response.writeHead(200, {
         "Content-Type": contentTypeFor(filePath),
-        "Cache-Control": filePath.startsWith("/media/sha256/")
-          ? "public, max-age=31536000, immutable"
-          : "no-cache, must-revalidate",
+        "Cache-Control":
+          filePath.startsWith("/media/sha256/") || filePath.startsWith("/_astro/")
+            ? "public, max-age=31536000, immutable"
+            : "no-cache, must-revalidate",
+        ...securityHeaders,
       });
       response.end(body);
     } catch {
-      response.writeHead(500, { "Content-Type": "text/plain; charset=utf-8" });
+      response.writeHead(500, {
+        "Content-Type": "text/plain; charset=utf-8",
+        ...securityHeaders,
+      });
       response.end("server error");
     }
   });
@@ -110,17 +153,5 @@ export const buildReaderFixture = async (): Promise<BrowserBuild> => {
       await rm(buildRoot, { recursive: true, force: true });
       await rm(fixture.root, { recursive: true, force: true });
     },
-  };
-};
-
-export const buildReaderOutput = async (): Promise<BrowserBuild> => {
-  const { copyDeclaredAssets } = await import("../../tools/copy-assets");
-  await copyDeclaredAssets({
-    inputRoot: join(projectRoot, "site-input"),
-    distRoot: join(projectRoot, "dist"),
-  });
-  return {
-    distRoot: join(projectRoot, "dist"),
-    cleanup: async () => {},
   };
 };

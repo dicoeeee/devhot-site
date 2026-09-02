@@ -12,7 +12,7 @@ jobs:
   publication-gate:
     name: publication-gate
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     env:
       ASTRO_TELEMETRY_DISABLED: "1"
     steps:
@@ -130,6 +130,9 @@ jobs:
 
       - name: Install locked dependencies
         run: npm ci
+
+      - name: Install pinned browser engines
+        run: npx playwright install --with-deps chromium firefox webkit
 
       - name: Run the single repository gate
         shell: bash
