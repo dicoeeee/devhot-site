@@ -82,10 +82,10 @@ describe("publication-gate workflow", () => {
     }
   });
 
-  it("provides Bash and Git before repository fixture tests run", async () => {
+  it("provides Git before repository fixture tests run", async () => {
     const workflow = await readFile(repositoryWorkflowPath, "utf8");
     const fixtureRuntimeInstallIndex = workflow.indexOf(
-      "run: apk add --no-cache bash git",
+      "run: apt-get update && apt-get install -y --no-install-recommends git",
     );
     const dependencyInstallIndex = workflow.indexOf("run: npm ci");
     const repositoryGateIndex = workflow.indexOf("run: npm run gate");

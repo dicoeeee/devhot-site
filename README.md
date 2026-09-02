@@ -83,13 +83,14 @@ Astro pages → dist/ → output verifier
 ## 固定构建运行时
 
 - Node.js：`24.19.0`，官方发布于 2026-08-03。
-- 官方构建镜像：`node:24.19.0-alpine3.24`。
+- 官方构建镜像：`node:24.19.0-bookworm`（Debian 12）。
 - OCI multi-platform digest：
-  `sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43`。
-- Docker Hub 在 2026-08-19 回读的支持架构：`linux/amd64`、`linux/arm64/v8`、
-  `linux/s390x`。
+  `sha256:4196d66a565c6f195728d9952f161f4adfe2ad753052a08b7ec7f1c5a6bda42b`。
+- 该 digest 于 2026-09-02 重新解析；支持 `linux/amd64`、`linux/arm64/v8`、
+  `linux/ppc64le`。镜像切换到 Debian 基底是因为 Playwright 官方不支持 Alpine，三引擎浏览器检查需要
+  `npx playwright install --with-deps` 的 apt 依赖链；Node 版本与门禁命令保持不变。
 
-`Dockerfile` 同时固定可读 tag 和 digest，并在镜像构建中执行 `npm ci` 与
+`Dockerfile` 同时固定可读 tag 和 digest，并在镜像构建中执行 `npm ci`、三引擎浏览器安装与
 `npm run gate`。GitHub Actions 使用同一精确 Node 版本和唯一门禁。
 
 Rolldown 1.2.5 先前缺失的 `darwin-x64` 与 `linux-arm64-gnu` optional
