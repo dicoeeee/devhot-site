@@ -260,7 +260,6 @@ describe("publication output", () => {
     "\nconst socket = new WebSocket('wss://example.com/socket');\n",
     "\nconst source = new EventSource('https://example.com/stream');\n",
     "\nconst xhr = new XMLHttpRequest(); xhr.open('GET', 'https://example.com/api');\n",
-    "\nconst shared = new SharedWorker('https://example.com/shared.js');\n",
     "\nfetch('//cdn.example.com/fragment');\n",
     "\nconst beacon = navigator.sendBeacon('http://example.com/track', 'y');\n",
     "\nconst ws = new WebSocket('ws://example.com/socket');\n",
@@ -272,6 +271,12 @@ describe("publication output", () => {
     "\nconst ws = new WebSocket('WSS://example.com/socket');\n",
     "\nfetch(`//cdn.example.com/${'fragment'}`);\n",
     "\nconst s = `https://example.com/${'a'}`;\n",
+    '\nfetch(" https://example.com/api");\n',
+    '\nfetch("\thttps://example.com/api");\n',
+    '\nfetch("\\nhttps://example.com/api");\n',
+    '\nfetch("https://example.com/api ");\n',
+    "\nfetch(` https://example.com/api`);\n",
+    '\nfetch("  WsS://example.com/api");\n',
   ])(
     "rejects a distributed script that opens a third-party connection via %s",
     async (payload) => {
@@ -289,6 +294,16 @@ describe("publication output", () => {
     "\nconst worker = new Worker('https://example.com/worker.js');\n",
     "\nconst worker = new Worker(`https://example.com/worker.js`);\n",
     "\nconst worker = new Worker('/worker.js');\n",
+    "\nconst shared = new SharedWorker('/shared.js');\n",
+    "\nconst worker = new window.Worker('/worker.js');\n",
+    "\nconst shared = new window.SharedWorker('/shared.js');\n",
+    "\nconst worker = new globalThis.Worker('/worker.js');\n",
+    "\nconst shared = new globalThis.SharedWorker('/shared.js');\n",
+    "\nconst worker = new self.Worker('/worker.js');\n",
+    "\nconst shared = new self.SharedWorker('/shared.js');\n",
+    '\nconst worker = new window["Worker"]("/worker.js");\n',
+    '\nconst shared = new globalThis["SharedWorker"]("/shared.js");\n',
+    "\nconst url = '/worker.js'; const worker = new Worker(url);\n",
   ])("rejects a distributed script that constructs a Worker via %s", async (payload) => {
     const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
     await cp(distRoot, tamperedDist, { recursive: true });

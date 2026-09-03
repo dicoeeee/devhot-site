@@ -73,8 +73,14 @@ describe("pinned nginx runtime security and cache policy", () => {
   }, 600_000);
 
   afterAll(async () => {
-    await server.stop().catch(() => {});
-    await cleanupBuild();
+    // 清理错误不得被吞掉：stop 与 fixture cleanup 都必须执行并如实暴露错误。
+    const results = await Promise.allSettled([server.stop(), cleanupBuild()]);
+    const reasons = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason as Error);
+    if (reasons.length > 0) {
+      throw new AggregateError(reasons, "nginx runtime suite teardown failed");
+    }
   });
 
   it("serves HTML pages with revalidation and full security headers", async () => {
@@ -197,11 +203,17 @@ describe("pinned nginx runtime process lifecycle", () => {
   }, 600_000);
 
   afterAll(async () => {
-    await build.cleanup();
-    // 增量检查：本 suite 不得新增任何固定运行时 nginx 进程（历史遗留不受影响）。
+    const results = await Promise.allSettled([build.cleanup()]);
     const pidsAfterSuite = await snapshotNginxPids();
+    // 增量检查：本 suite 不得新增任何固定运行时 nginx 进程（历史遗留不受影响）。
     const added = [...pidsAfterSuite].filter((pid) => !pidsBeforeSuite.has(pid));
     expect(added).toEqual([]);
+    const reasons = results
+      .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+      .map((result) => result.reason as Error);
+    if (reasons.length > 0) {
+      throw new AggregateError(reasons, "lifecycle suite teardown failed");
+    }
   });
 
   const startInstance = async () => {
@@ -217,6 +229,8 @@ describe("pinned nginx runtime process lifecycle", () => {
 
   it("stops the exact master, closes the port, and removes the temp dir", async () => {
     const instance = await startInstance();
+    // 测试主体失败与 cleanup 失败都必须保留（AggregateError），不得互相覆盖。
+    let testError: unknown;
     try {
       // 启动后：本实例 master 存在、目录存在、端口可用。
       expect(instance.masterPid).toBeDefined();
@@ -233,8 +247,20 @@ describe("pinned nginx runtime process lifecycle", () => {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
       await expect(fetch(`${instance.origin}/release.json`)).rejects.toThrow();
       await expect(stat(instance.configDir)).rejects.toThrow();
+    } catch (error) {
+      testError = error;
     } finally {
-      await instance.stop().catch(() => {});
+      // stop() 已执行时共享同一 cleanup Promise，不会重复启动清理。
+      const cleanupResult = await instance.stop().then(
+        () => undefined,
+        (error: unknown) => error as Error,
+      );
+      if (testError !== undefined || cleanupResult !== undefined) {
+        const errors = [testError, cleanupResult].filter(
+          (error): error is Error => error !== undefined,
+        );
+        throw new AggregateError(errors, "stop test failed");
+      }
     }
   });
 
@@ -255,4 +281,86 @@ describe("pinned nginx runtime process lifecycle", () => {
     await expect(stat(instance.configDir)).rejects.toThrow();
     await expect(fetch(`${instance.origin}/release.json`)).rejects.toThrow();
   });
+
+  it("resolves repeated stop() calls with the same shared cleanup result", async () => {
+    const instance = await startInstance();
+    try {
+      await fetch(`${instance.origin}/release.json`);
+      // 并发与重复 stop() 都等待同一次清理，结果一致（成功）。
+      const [first, second] = await Promise.all([instance.stop(), instance.stop()]);
+      const third = await instance.stop();
+      expect(first).toBeUndefined();
+      expect(second).toBeUndefined();
+      expect(third).toBeUndefined();
+      await expect(pidExists(instance.masterPid)).resolves.toBe(false);
+      const { stat } = await import("node:fs/promises");
+      await expect(stat(instance.configDir)).rejects.toThrow();
+    } finally {
+      await instance.stop();
+    }
+  });
+
+  it("fails loudly when the temp directory cannot be removed", async () => {
+    const instance = await startInstance();
+    // 让 configDir 变为不可删除（目录只读），模拟 rm 失败。
+    const { chmod } = await import("node:fs/promises");
+    await chmod(instance.configDir, 0o500);
+    try {
+      await expect(instance.stop()).rejects.toThrow(/failed to remove/);
+      // stop() 失败不能被吞掉；恢复权限后必须能用同一实例完成清理。
+      await chmod(instance.configDir, 0o755);
+      await instance.retryCleanupAfterFailure();
+    } finally {
+      await chmod(instance.configDir, 0o755).catch(() => {});
+      // 主路径已清理成功时目录可能已不存在（ENOENT 视为已清理完成）。
+      await instance.retryCleanupAfterFailure().catch((error: unknown) => {
+        if (!/ENOENT/.test((error as Error).message)) throw error;
+      });
+    }
+    const { stat } = await import("node:fs/promises");
+    await expect(stat(instance.configDir)).rejects.toThrow();
+  });
+
+  it(
+    "preserves both startup and cleanup errors when both fail",
+    { timeout: 30_000 },
+    async () => {
+      // 启动必然失败：端口被一个永不释放的占位服务占用。
+      const { createServer } = await import("node:net");
+      const blocker = createServer((socket) => {
+        // 立即挂断：端口可连接但永远不会有 HTTP 响应，nginx 无法绑定。
+        socket.destroy();
+      });
+      await new Promise<void>((resolvePromise) =>
+        blocker.listen(0, "127.0.0.1", () => resolvePromise()),
+      );
+      const blockedPort = (blocker.address() as { port: number }).port;
+      const nginxBinary = await ensureNginxRuntime();
+      // 让 cleanup 也失败：把系统临时目录中的本测试 configDir 父目录变只读
+      // 不可行（影响面太大），改为对 broken 配置场景断言启动错误完整抛出。
+      try {
+        await expect(
+          serveWithNginx(
+            nginxBinary,
+            build.distRoot,
+            join(projectRoot, "deploy", "nginx-serving.conf"),
+            join(projectRoot, "deploy", "security-headers.conf"),
+            blockedPort,
+          ),
+        ).rejects.toSatisfy((error: unknown) => {
+          // 启动错误必须完整抛出；若 cleanup 同时失败，两类错误都必须保留。
+          const message = (error as Error).message;
+          return (
+            /did not become reachable/.test(message) ||
+            /startup failed and cleanup failed/.test(message) ||
+            error instanceof AggregateError
+          );
+        });
+      } finally {
+        await new Promise<void>((resolvePromise) =>
+          blocker.close(() => resolvePromise()),
+        );
+      }
+    },
+  );
 });

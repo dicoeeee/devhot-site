@@ -217,16 +217,19 @@ export const scanHtmlSecurity = (html: string, path: string): void => {
 };
 
 // 生成 JS 的第三方连接检查基于 AST（acorn）：
-// - StringLiteral、NoSubstitutionTemplateLiteral、可静态确定（全部 quasis、零表达式）
-//   的 TemplateExpression 都视为可静态检查的字符串值；
+// - StringLiteral、无插值模板字符串、含插值模板的每个 quasi 都按值检查；
+// - 检查前先 trim() 两端空白（URL parser 会忽略前导空白）；
 // - 拒绝大小写不敏感的 http://、https://、ws://、wss:// 与协议相对 // 第三方 URL；
 // - 站内相对 URL（如 /timeline/fragments/...）不受影响；
-// - Worker/SharedWorker 构造一律拒绝（无论 URL 来源），并保留 service worker
-//   注册与内联事件处理属性的既有拒绝策略。
-const isExternalScriptUrl = (value: string): boolean =>
-  /^(?:https?|wss?):\/\//i.test(value) || value.startsWith("//");
+// - Worker/SharedWorker 构造（Identifier、window/globalThis/self 成员形式、
+//   可静态确定的 computed property）一律拒绝，不论参数来源；
+// - 并保留 service worker 注册与内联事件处理属性的既有拒绝策略。
+const isExternalScriptUrl = (value: string): boolean => {
+  const normalized = value.trim();
+  return /^(?:https?|wss?):\/\//i.test(normalized) || normalized.startsWith("//");
+};
 
-// 模板字符串按前缀判定：任一 quasi（含首个）以第三方 scheme 开头即拒绝，
+// 模板字符串按前缀判定：任一 quasi（trim 后）以第三方 scheme 开头即拒绝，
 // 含 ${} 插值的模板无法静态证明其最终值，同样按前缀拒绝。
 const templateIsExternal = (node: AcornNode): string | undefined => {
   const template = node as unknown as {
@@ -235,6 +238,37 @@ const templateIsExternal = (node: AcornNode): string | undefined => {
   for (const quasi of template.quasis ?? []) {
     const cooked = quasi.value.cooked;
     if (cooked !== null && isExternalScriptUrl(cooked)) return cooked;
+  }
+  return undefined;
+};
+
+// callee 的静态可读名称：Identifier（Worker）、全局成员（window.Worker、
+// globalThis.SharedWorker、self.Worker）与 computed 形式（window["Worker"]）。
+const WORKER_GLOBALS = new Set(["window", "globalThis", "self"]);
+const WORKER_CONSTRUCTORS = new Set(["Worker", "SharedWorker"]);
+
+const calleeConstructorName = (callee: AcornNode): string | undefined => {
+  const node = callee as unknown as {
+    type: string;
+    name?: string;
+    object?: { type: string; name?: string };
+    property?: { type: string; name?: string; value?: unknown };
+    computed?: boolean;
+  };
+  if (node.type === "Identifier") return node.name;
+  if (node.type === "MemberExpression") {
+    if (
+      node.object?.type === "Identifier" &&
+      WORKER_GLOBALS.has(node.object.name ?? "")
+    ) {
+      if (!node.computed && node.property?.type === "Identifier") {
+        return node.property.name;
+      }
+      if (node.computed && node.property?.type === "Literal") {
+        const value = (node.property as unknown as { value?: unknown }).value;
+        if (typeof value === "string") return value;
+      }
+    }
   }
   return undefined;
 };
@@ -262,11 +296,12 @@ const scanScriptSecurity = (source: string, path: string): void => {
         throw new Error(`external runtime dependency found in ${path}: ${offending}`);
       }
     }
-    if (
-      candidate.type === "NewExpression" &&
-      (node as unknown as { callee: { name?: string } }).callee?.name === "Worker"
-    ) {
-      throw new Error(`worker constructor found in ${path}`);
+    if (candidate.type === "NewExpression") {
+      const callee = (node as unknown as { callee?: AcornNode }).callee;
+      const constructorName = callee ? calleeConstructorName(callee) : undefined;
+      if (constructorName !== undefined && WORKER_CONSTRUCTORS.has(constructorName)) {
+        throw new Error(`worker constructor found in ${path}: ${constructorName}`);
+      }
     }
     for (const key of Object.keys(node)) {
       if (key === "type" || key === "start" || key === "end") continue;

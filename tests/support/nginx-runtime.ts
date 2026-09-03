@@ -113,7 +113,13 @@ export interface NginxServer {
   readonly masterPid: number | undefined;
   /** 本实例创建的临时配置/dist 目录（stop() 成功后被删除）。 */
   readonly configDir: string;
+  /** 统一清理：SIGTERM → 等待退出 → 端口关闭验证 → 删除临时目录。 */
   stop(): Promise<void>;
+  /**
+   * 上一次清理失败后的重试：丢弃失败的共享 Promise，重新执行完整清理。
+   * 仅用于测试在修复外部条件（如目录权限）后完成清理。
+   */
+  retryCleanupAfterFailure(): Promise<void>;
 }
 
 export const findFreePort = async (): Promise<number> => {
@@ -188,12 +194,13 @@ export const serveWithNginx = async (
 
   const STOP_TIMEOUT_MS = 10_000;
 
-  // 统一清理路径（幂等，只执行一次）：SIGTERM master → 有界等待退出 →
-  // 端口必须不可连接 → 删除本次创建的 configDir。任何一步失败都抛出明确错误。
-  let cleanupDone = false;
-  const cleanupOnce = async (context: string): Promise<void> => {
-    if (cleanupDone) return;
-    cleanupDone = true;
+  // 统一清理路径：并发或重复 stop() 共享同一个 cleanup Promise，等待同一次
+  // 清理的最终结果（失败也等待并抛出，不得在清理完成前报告成功）。
+  // 步骤：SIGTERM master → 有界等待退出（超时则 SIGKILL 受控终局并等待精确
+  // child 退出）→ 端口必须不可连接 → 无条件删除本次创建的 configDir。
+  // 任何一步失败都进入 failures，最终抛出聚合错误。
+  let cleanupPromise: Promise<void> | undefined;
+  const runCleanup = async (context: string): Promise<void> => {
     const failures: string[] = [];
     if (child.exitCode === null && !child.killed) {
       child.kill("SIGTERM");
@@ -205,33 +212,41 @@ export const serveWithNginx = async (
       ),
     ]);
     if (exitedWithTimeout === "timeout") {
-      failures.push(
-        `pinned nginx master (pid ${child.pid}) did not exit within ${STOP_TIMEOUT_MS}ms of SIGTERM`,
-      );
-    }
-    if (failures.length === 0) {
-      let reachable = false;
-      for (let attempt = 0; attempt < 100; attempt += 1) {
-        try {
-          const probe = await fetch(`http://127.0.0.1:${listenPort}/`, {
-            redirect: "manual",
-          });
-          await probe.arrayBuffer();
-          reachable = true;
-          await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-        } catch {
-          reachable = false;
-          break;
-        }
-      }
-      if (reachable) {
+      // 受控终局：SIGKILL 精确 child，再等待其退出；仍不退出则保留错误。
+      child.kill("SIGKILL");
+      const killed = await Promise.race([
+        exited.then(() => true),
+        new Promise<boolean>((resolvePromise) =>
+          setTimeout(() => resolvePromise(false), STOP_TIMEOUT_MS).unref(),
+        ),
+      ]);
+      if (!killed) {
         failures.push(
-          `pinned nginx port ${listenPort} is still reachable after the master exited`,
+          `pinned nginx master (pid ${child.pid}) survived SIGTERM and SIGKILL`,
         );
       }
     }
+    let portClosed = true;
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      try {
+        const probe = await fetch(`http://127.0.0.1:${listenPort}/`, {
+          redirect: "manual",
+        });
+        await probe.arrayBuffer();
+        portClosed = false;
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      } catch {
+        portClosed = true;
+        break;
+      }
+    }
+    if (!portClosed) {
+      failures.push(
+        `pinned nginx port ${listenPort} is still reachable after the master exited`,
+      );
+    }
     try {
-      await rm(configDir, { recursive: true, force: false });
+      await rm(configDir, { recursive: true });
     } catch (error) {
       failures.push(`failed to remove ${configDir}: ${(error as Error).message}`);
     }
@@ -239,8 +254,12 @@ export const serveWithNginx = async (
       throw new Error(`nginx cleanup failed during ${context}: ${failures.join("; ")}`);
     }
   };
+  const cleanupOnce = (context: string): Promise<void> => {
+    cleanupPromise ??= runCleanup(context);
+    return cleanupPromise;
+  };
 
-  // 等待端口可连接；任何失败都走统一清理。
+  // 等待端口可连接；启动失败时必须同时报告原始错误与 cleanup 错误。
   for (let attempt = 0; attempt < 100; attempt += 1) {
     try {
       const probe = await fetch(`http://127.0.0.1:${listenPort}/release.json`, {
@@ -251,8 +270,16 @@ export const serveWithNginx = async (
     } catch {
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
       if (attempt === 99) {
-        await cleanupOnce("startup").catch(() => {});
-        throw new Error("pinned nginx did not become reachable");
+        const startupError = new Error("pinned nginx did not become reachable");
+        try {
+          await cleanupOnce("startup");
+        } catch (cleanupError) {
+          throw new AggregateError(
+            [startupError, cleanupError as Error],
+            "pinned nginx startup failed and cleanup failed",
+          );
+        }
+        throw startupError;
       }
     }
   }
@@ -262,5 +289,9 @@ export const serveWithNginx = async (
     masterPid: child.pid,
     configDir,
     stop: () => cleanupOnce("stop"),
+    retryCleanupAfterFailure: () => {
+      cleanupPromise = undefined;
+      return cleanupOnce("retry");
+    },
   };
 };
