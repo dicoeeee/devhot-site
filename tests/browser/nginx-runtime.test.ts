@@ -301,18 +301,30 @@ describe("pinned nginx runtime process lifecycle", () => {
   });
 
   it("fails loudly when the temp directory cannot be removed", async () => {
-    const instance = await startInstance();
-    // 让 configDir 变为不可删除（目录只读），模拟 rm 失败。
-    const { chmod } = await import("node:fs/promises");
-    await chmod(instance.configDir, 0o500);
+    // 用注入的删除钩子确定性模拟 rm 失败（root 用户会绕过权限位，
+    // 因此不能依赖 chmod）。
+    const failures: string[] = [];
+    const nginxBinary = await ensureNginxRuntime();
+    const instance = await serveWithNginx(
+      nginxBinary,
+      build.distRoot,
+      join(projectRoot, "deploy", "nginx-serving.conf"),
+      join(projectRoot, "deploy", "security-headers.conf"),
+      await findFreePort(),
+      {
+        removeConfigDir: async (path) => {
+          failures.push(`simulated EACCES: ${path}`);
+          throw new Error("EACCES: simulated permission failure");
+        },
+      },
+    );
     try {
       await expect(instance.stop()).rejects.toThrow(/failed to remove/);
-      // stop() 失败不能被吞掉；恢复权限后必须能用同一实例完成清理。
-      await chmod(instance.configDir, 0o755);
+      expect(failures).toHaveLength(1);
+      // 失败后通过重试入口恢复真实删除，完成清理。
       await instance.retryCleanupAfterFailure();
     } finally {
-      await chmod(instance.configDir, 0o755).catch(() => {});
-      // 主路径已清理成功时目录可能已不存在（ENOENT 视为已清理完成）。
+      // 重试已成功删除目录；再次重试的 ENOENT 视为已清理完成。
       await instance.retryCleanupAfterFailure().catch((error: unknown) => {
         if (!/ENOENT/.test((error as Error).message)) throw error;
       });

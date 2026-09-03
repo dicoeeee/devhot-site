@@ -139,12 +139,18 @@ export const findFreePort = async (): Promise<number> => {
 // 以真实 Nginx 服务 distRoot：serving config 的 include 被重写为指向仓库内
 // security-headers.conf，root 指向 distRoot，其余逐字保留。监听端口由调用方
 // 通过临时 nginx 配置动态分配，避免与遗留进程或并行运行冲突。
+export interface ServeWithNginxOptions {
+  /** 测试注入：替换 configDir 删除动作，用于确定性模拟清理失败。 */
+  readonly removeConfigDir?: (path: string) => Promise<void>;
+}
+
 export const serveWithNginx = async (
   nginxBinaryPath: string,
   distRoot: string,
   servingConfigPath: string,
   securityHeadersPath: string,
   listenPort: number,
+  options: ServeWithNginxOptions = {},
 ): Promise<NginxServer> => {
   const configDir = join(tmpdir(), `devhot-nginx-conf-${process.pid}-${Date.now()}`);
   await mkdir(configDir, { recursive: true, mode: 0o755 });
@@ -199,6 +205,9 @@ export const serveWithNginx = async (
   // 步骤：SIGTERM master → 有界等待退出（超时则 SIGKILL 受控终局并等待精确
   // child 退出）→ 端口必须不可连接 → 无条件删除本次创建的 configDir。
   // 任何一步失败都进入 failures，最终抛出聚合错误。
+  const realRemove = async (path: string): Promise<void> => rm(path, { recursive: true });
+  let removeConfigDir: (path: string) => Promise<void> =
+    options.removeConfigDir ?? realRemove;
   let cleanupPromise: Promise<void> | undefined;
   const runCleanup = async (context: string): Promise<void> => {
     const failures: string[] = [];
@@ -246,7 +255,7 @@ export const serveWithNginx = async (
       );
     }
     try {
-      await rm(configDir, { recursive: true });
+      await removeConfigDir(configDir);
     } catch (error) {
       failures.push(`failed to remove ${configDir}: ${(error as Error).message}`);
     }
@@ -291,6 +300,8 @@ export const serveWithNginx = async (
     stop: () => cleanupOnce("stop"),
     retryCleanupAfterFailure: () => {
       cleanupPromise = undefined;
+      // 重试必须恢复真实删除：注入钩子只用于模拟一次性失败。
+      removeConfigDir = realRemove;
       return cleanupOnce("retry");
     },
   };
