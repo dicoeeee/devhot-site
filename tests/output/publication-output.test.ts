@@ -277,6 +277,14 @@ describe("publication output", () => {
     '\nfetch("https://example.com/api ");\n',
     "\nfetch(` https://example.com/api`);\n",
     '\nfetch("  WsS://example.com/api");\n',
+    '\nfetch("\u0000https://example.com/api");\n',
+    '\nfetch("\u001Fhttps://example.com/api");\n',
+    '\nfetch("ht\\ntps://example.com/api");\n',
+    '\nfetch("htt\\tps://example.com/api");\n',
+    '\nfetch("https://example.com/api\\r\\n");\n',
+    "\nfetch(`\\u0000https://example.com/api`);\n",
+    "\nfetch(`ht\\ttps://example.com/api`);\n",
+    '\nfetch("HT\\nTps://example.com/api");\n',
   ])(
     "rejects a distributed script that opens a third-party connection via %s",
     async (payload) => {

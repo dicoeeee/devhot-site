@@ -87,8 +87,20 @@ const parseMetadata = (value: unknown): PublicationMetadata => {
 
 const EVENT_HANDLER_ATTRIBUTE = /^on[a-z]+$/i;
 
+// WHATWG URL 风格输入预处理（https://url.spec.whatwg.org/#url-parsing）：
+// 1. 删除任意位置的 ASCII TAB（U+0009）、LF（U+000A）、CR（U+000D）；
+// 2. 删除首尾全部 C0 control（U+0000–U+001F）与 space（U+0020）。
+// 浏览器会把 "\u0000https://…"、"ht\ntps://…" 等解析为真实外部 URL，
+// 因此 scheme 判断必须在同一规范化之后进行。JS、HTML、CSS 的所有 URL
+// 检查共用本函数。
+export const normalizeUrlValue = (value: string): string =>
+  value
+    .replace(/[\u0009\u000A\u000D]/g, "")
+    .replace(/^[\u0000-\u0020]+/, "")
+    .replace(/[\u0000-\u0020]+$/, "");
+
 const isExternalReference = (value: string): boolean =>
-  /^(?:https?:)?\/\//i.test(value.trim());
+  /^(?:https?:)?\/\//i.test(normalizeUrlValue(value));
 
 const walk = (node: Node, visit: (element: Element) => void): void => {
   if ("tagName" in node) {
@@ -225,7 +237,7 @@ export const scanHtmlSecurity = (html: string, path: string): void => {
 //   可静态确定的 computed property）一律拒绝，不论参数来源；
 // - 并保留 service worker 注册与内联事件处理属性的既有拒绝策略。
 const isExternalScriptUrl = (value: string): boolean => {
-  const normalized = value.trim();
+  const normalized = normalizeUrlValue(value);
   return /^(?:https?|wss?):\/\//i.test(normalized) || normalized.startsWith("//");
 };
 
@@ -329,10 +341,13 @@ const scanScriptSecurity = (source: string, path: string): void => {
 };
 
 const scanStyleSecurity = (source: string, path: string): void => {
-  if (/@import\s+(?:url\()?\s*(["']?)(?:https?:)?\/\//i.test(source)) {
+  // CSS 中的 URL 同样按 WHATWG 规范化后判断：内部 TAB/LF/CR 与首尾
+  // C0/space 都不能掩盖外部 scheme。
+  const normalizedSource = normalizeUrlValue(source).replace(/[\t\n\r]/g, "");
+  if (/@import\s+(?:url\()?\s*(["']?)(?:https?:)?\/\//i.test(normalizedSource)) {
     throw new Error(`external runtime dependency found in ${path}`);
   }
-  if (/url\s*\(\s*(["']?)(?:https?:)?\/\//i.test(source)) {
+  if (/url\s*\(\s*(["']?)(?:https?:)?\/\//i.test(normalizedSource)) {
     throw new Error(`external runtime dependency found in ${path}`);
   }
 };

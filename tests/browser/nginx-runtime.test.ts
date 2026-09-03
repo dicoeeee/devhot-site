@@ -1,13 +1,15 @@
-import { readdir } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { join } from "node:path";
+import { tmpdir } from "node:os";
 
-import { beforeAll, afterAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   ensureNginxRuntime,
   findFreePort,
+  listDevhotNginxPids,
   serveWithNginx,
   type NginxServer,
 } from "../support/nginx-runtime";
@@ -46,6 +48,91 @@ const findAsset = async (distRoot: string, directory: string, suffix: string) =>
   return `${directory}/${match}`;
 };
 
+const execFileAsync = promisify(execFile) as (
+  command: string,
+  args: string[],
+) => Promise<{ stdout: string }>;
+
+/** 全文件级快照：本测试文件启动任何 Nginx 之前记录一次。 */
+interface FileSnapshot {
+  readonly pids: readonly number[];
+  readonly ports: readonly number[];
+  readonly confDirs: readonly string[];
+}
+
+const listNginxListenPorts = async (): Promise<readonly number[]> => {
+  const ports: number[] = [];
+  try {
+    const { stdout } = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"]);
+    for (const line of stdout.split("\n")) {
+      if (line.includes("nginx")) {
+        const match = line.match(/127\.0\.0\.1:(\d+)/);
+        if (match) ports.push(Number(match[1]));
+      }
+    }
+  } catch {
+    // lsof 不可用时退化为 ps 检查（端口断言跳过，进程断言仍有效）。
+  }
+  return ports;
+};
+
+const listConfDirs = async (): Promise<readonly string[]> => {
+  const { readdir } = await import("node:fs/promises");
+  const entries = await readdir(tmpdir());
+  return entries.filter((entry) => entry.startsWith("devhot-nginx-conf-")).sort();
+};
+
+const snapshotBeforeFile = {
+  pids: await listDevhotNginxPids(),
+  ports: await listNginxListenPorts(),
+  confDirs: await listConfDirs(),
+} satisfies FileSnapshot;
+
+const assertNoNewResidue = async (context: string): Promise<void> => {
+  const [pids, ports, confDirs] = await Promise.all([
+    listDevhotNginxPids(),
+    listNginxListenPorts(),
+    listConfDirs(),
+  ]);
+  const addedPids = pids.filter((pid) => !snapshotBeforeFile.pids.includes(pid));
+  const addedPorts = ports.filter((port) => !snapshotBeforeFile.ports.includes(port));
+  const addedDirs = confDirs.filter((dir) => !snapshotBeforeFile.confDirs.includes(dir));
+  if (addedPids.length + addedPorts.length + addedDirs.length > 0) {
+    throw new Error(
+      `${context} left new nginx residue: pids=[${addedPids.join(",")}] ` +
+        `ports=[${addedPorts.join(",")}] confDirs=[${addedDirs.join(",")}] ` +
+        `(baseline pids=[${snapshotBeforeFile.pids.join(",")}] ` +
+        `ports=[${snapshotBeforeFile.ports.join(",")}] ` +
+        `dirs=[${snapshotBeforeFile.confDirs.join(",")}])`,
+    );
+  }
+};
+
+/** 每个实例 stop() 后的完整断言：进程树、端口、目录全部消失。 */
+const assertInstanceGone = async (instance: NginxServer): Promise<void> => {
+  const pids = await listDevhotNginxPids();
+  const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,command"]);
+  const workers = stdout
+    .split("\n")
+    .filter(
+      (line) =>
+        line.includes("nginx: worker process") &&
+        (line.includes(String(instance.masterPid)) || line.includes(instance.configDir)),
+    );
+  expect(
+    pids.includes(instance.masterPid),
+    `master pid ${instance.masterPid} still alive (configDir=${instance.configDir})`,
+  ).toBe(false);
+  expect(
+    workers,
+    `workers of master ${instance.masterPid} still alive (configDir=${instance.configDir})`,
+  ).toEqual([]);
+  await expect(
+    stat(instance.configDir),
+    `configDir ${instance.configDir} still exists`,
+  ).rejects.toThrow();
+};
+
 describe("pinned nginx runtime security and cache policy", () => {
   let server: NginxServer;
   let cleanupBuild: () => Promise<void>;
@@ -75,6 +162,10 @@ describe("pinned nginx runtime security and cache policy", () => {
   afterAll(async () => {
     // 清理错误不得被吞掉：stop 与 fixture cleanup 都必须执行并如实暴露错误。
     const results = await Promise.allSettled([server.stop(), cleanupBuild()]);
+    // 本组实例的精确身份断言：进程树、端口、目录全部消失。
+    await assertInstanceGone(server);
+    // 全文件增量断言：不得新增任何进程/端口/目录。
+    await assertNoNewResidue("security suite");
     const reasons = results
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
       .map((result) => result.reason as Error);
@@ -166,48 +257,13 @@ describe("pinned nginx runtime security and cache policy", () => {
 describe("pinned nginx runtime process lifecycle", () => {
   let build: Awaited<ReturnType<typeof buildReaderFixture>>;
 
-  const execFileAsync = promisify(execFile) as (
-    command: string,
-    args: string[],
-  ) => Promise<{ stdout: string }>;
-
-  // 快照匹配本仓库固定运行时启动的全部 nginx 进程 PID（不限 PPID：
-  // 泄漏进程可能仍以测试运行器为父进程，也可能被 PID 1 接管）。
-  const snapshotNginxPids = async (): Promise<Set<number>> => {
-    const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
-    const pids = new Set<number>();
-    for (const line of stdout.split("\n")) {
-      const match = line.match(/^\s*(\d+)\s+(.*)$/);
-      if (match?.[2]?.includes("devhot-nginx-1.30.4")) {
-        pids.add(Number(match[1]));
-      }
-    }
-    return pids;
-  };
-
-  const pidExists = async (pid: number | undefined): Promise<boolean> => {
-    if (pid === undefined) return false;
-    try {
-      await execFileAsync("ps", ["-p", String(pid)]);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-
-  let pidsBeforeSuite = new Set<number>();
-
   beforeAll(async () => {
-    pidsBeforeSuite = await snapshotNginxPids();
     build = await buildReaderFixture();
   }, 600_000);
 
   afterAll(async () => {
     const results = await Promise.allSettled([build.cleanup()]);
-    const pidsAfterSuite = await snapshotNginxPids();
-    // 增量检查：本 suite 不得新增任何固定运行时 nginx 进程（历史遗留不受影响）。
-    const added = [...pidsAfterSuite].filter((pid) => !pidsBeforeSuite.has(pid));
-    expect(added).toEqual([]);
+    await assertNoNewResidue("lifecycle suite");
     const reasons = results
       .filter((result): result is PromiseRejectedResult => result.status === "rejected")
       .map((result) => result.reason as Error);
@@ -227,120 +283,171 @@ describe("pinned nginx runtime process lifecycle", () => {
     );
   };
 
-  it("stops the exact master, closes the port, and removes the temp dir", async () => {
-    const instance = await startInstance();
-    // 测试主体失败与 cleanup 失败都必须保留（AggregateError），不得互相覆盖。
-    let testError: unknown;
-    try {
-      // 启动后：本实例 master 存在、目录存在、端口可用。
-      expect(instance.masterPid).toBeDefined();
-      await expect(pidExists(instance.masterPid)).resolves.toBe(true);
-      const { stat } = await import("node:fs/promises");
-      await expect(stat(instance.configDir)).resolves.toBeTruthy();
-      const beforeStop = await fetch(`${instance.origin}/release.json`);
-      expect(beforeStop.status).toBe(200);
+  it(
+    "verifies spawn pid, pid file, and listener identity match, then stops cleanly",
+    { timeout: 30_000 },
+    async () => {
+      const instance = await startInstance();
+      let testError: unknown;
+      try {
+        // 启动成功契约：pid 文件 master PID === spawn PID（serveWithNginx 内已
+        // 断言，此处复核并记录），HTTP 可用，端口由本实例进程树持有。
+        const pidFile = await (
+          await import("node:fs/promises")
+        ).readFile(join(instance.configDir, "nginx.pid"), "utf8");
+        expect(Number.parseInt(pidFile.trim(), 10)).toBe(instance.masterPid);
+        const beforeStop = await fetch(`${instance.origin}/release.json`);
+        expect(beforeStop.status).toBe(200);
+        const pids = await listDevhotNginxPids();
+        expect(pids).toContain(instance.masterPid);
 
-      await instance.stop();
-
-      // stop() 后：精确 PID 不存在、端口不可连接、临时目录已删除。
-      await expect(pidExists(instance.masterPid)).resolves.toBe(false);
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
-      await expect(fetch(`${instance.origin}/release.json`)).rejects.toThrow();
-      await expect(stat(instance.configDir)).rejects.toThrow();
-    } catch (error) {
-      testError = error;
-    } finally {
-      // stop() 已执行时共享同一 cleanup Promise，不会重复启动清理。
-      const cleanupResult = await instance.stop().then(
-        () => undefined,
-        (error: unknown) => error as Error,
-      );
-      if (testError !== undefined || cleanupResult !== undefined) {
-        const errors = [testError, cleanupResult].filter(
-          (error): error is Error => error !== undefined,
-        );
-        throw new AggregateError(errors, "stop test failed");
+        await instance.stop();
+        await assertInstanceGone(instance);
+      } catch (error) {
+        testError = error;
+        throw error;
+      } finally {
+        if (testError !== undefined) {
+          await instance.retryCleanupAfterFailure().catch((cleanupError: unknown) => {
+            throw new AggregateError(
+              [testError as Error, cleanupError as Error],
+              "identity test failed and cleanup failed",
+            );
+          });
+        }
       }
-    }
-  });
+    },
+  );
 
-  it("cleans up through finally when a mid-test assertion throws", async () => {
-    const instance = await startInstance();
-    try {
-      await fetch(`${instance.origin}/release.json`);
-      // 故意失败：证明 finally 中的 stop() 仍会清理本实例。
-      throw new Error("deliberate mid-test failure");
-    } catch (error) {
-      expect((error as Error).message).toContain("deliberate mid-test failure");
-    } finally {
-      await instance.stop();
-    }
-    // finally 清理后：master 退出、目录删除、端口关闭。
-    await expect(pidExists(instance.masterPid)).resolves.toBe(false);
-    const { stat } = await import("node:fs/promises");
-    await expect(stat(instance.configDir)).rejects.toThrow();
-    await expect(fetch(`${instance.origin}/release.json`)).rejects.toThrow();
-  });
+  it(
+    "cleans up through finally when a mid-test assertion throws",
+    { timeout: 30_000 },
+    async () => {
+      const instance = await startInstance();
+      try {
+        await fetch(`${instance.origin}/release.json`);
+        // 故意失败：证明 finally 中的 stop() 仍会清理本实例。
+        throw new Error("deliberate mid-test failure");
+      } catch (error) {
+        expect((error as Error).message).toContain("deliberate mid-test failure");
+      } finally {
+        await instance.stop();
+      }
+      await assertInstanceGone(instance);
+    },
+  );
 
-  it("resolves repeated stop() calls with the same shared cleanup result", async () => {
-    const instance = await startInstance();
-    try {
-      await fetch(`${instance.origin}/release.json`);
-      // 并发与重复 stop() 都等待同一次清理，结果一致（成功）。
-      const [first, second] = await Promise.all([instance.stop(), instance.stop()]);
-      const third = await instance.stop();
-      expect(first).toBeUndefined();
-      expect(second).toBeUndefined();
-      expect(third).toBeUndefined();
-      await expect(pidExists(instance.masterPid)).resolves.toBe(false);
-      const { stat } = await import("node:fs/promises");
-      await expect(stat(instance.configDir)).rejects.toThrow();
-    } finally {
-      await instance.stop();
-    }
-  });
+  it(
+    "resolves repeated stop() calls with the same shared cleanup result",
+    { timeout: 30_000 },
+    async () => {
+      const instance = await startInstance();
+      try {
+        await fetch(`${instance.origin}/release.json`);
+        // 并发与重复 stop() 都等待同一次清理，结果一致（成功）。
+        const [first, second] = await Promise.all([instance.stop(), instance.stop()]);
+        const third = await instance.stop();
+        expect(first).toBeUndefined();
+        expect(second).toBeUndefined();
+        expect(third).toBeUndefined();
+      } finally {
+        // 若主体失败则确保清理；成功路径共享 Promise 已完成，重试等价于幂等确认。
+        await instance.retryCleanupAfterFailure();
+      }
+      await assertInstanceGone(instance);
+    },
+  );
 
-  it("fails loudly when the temp directory cannot be removed", async () => {
-    // 用注入的删除钩子确定性模拟 rm 失败（root 用户会绕过权限位，
-    // 因此不能依赖 chmod）。
-    const failures: string[] = [];
-    const nginxBinary = await ensureNginxRuntime();
-    const instance = await serveWithNginx(
-      nginxBinary,
-      build.distRoot,
-      join(projectRoot, "deploy", "nginx-serving.conf"),
-      join(projectRoot, "deploy", "security-headers.conf"),
-      await findFreePort(),
-      {
-        removeConfigDir: async (path) => {
-          failures.push(`simulated EACCES: ${path}`);
-          throw new Error("EACCES: simulated permission failure");
+  it(
+    "fails loudly when the temp directory cannot be removed",
+    { timeout: 30_000 },
+    async () => {
+      // 用注入的删除钩子确定性模拟 rm 失败（root 用户会绕过权限位，
+      // 因此不能依赖 chmod）。
+      const failures: string[] = [];
+      const nginxBinary = await ensureNginxRuntime();
+      const instance = await serveWithNginx(
+        nginxBinary,
+        build.distRoot,
+        join(projectRoot, "deploy", "nginx-serving.conf"),
+        join(projectRoot, "deploy", "security-headers.conf"),
+        await findFreePort(),
+        {
+          removeConfigDir: async (path) => {
+            failures.push(`simulated EACCES: ${path}`);
+            throw new Error("EACCES: simulated permission failure");
+          },
         },
-      },
+      );
+      try {
+        // stop() 必须失败且错误包含目录与实例身份；进程树仍被完整终止。
+        await expect(instance.stop()).rejects.toThrow(/failed to remove/);
+        expect(failures).toHaveLength(1);
+        await assertProcessTreeGone(instance);
+      } finally {
+        // 失败后通过重试入口恢复真实删除，完成清理。
+        await instance.retryCleanupAfterFailure();
+      }
+      await assertInstanceGone(instance);
+    },
+  );
+
+  it("rejects an invalid nginx config at setup and removes the configDir", async () => {
+    const nginxBinary = await ensureNginxRuntime();
+    const { mkdtemp, writeFile, rm } = await import("node:fs/promises");
+    const brokenRoot = await mkdtemp(join(tmpdir(), "devhot-broken-conf-"));
+    const brokenServing = join(brokenRoot, "nginx-serving.conf");
+    const brokenHeaders = join(brokenRoot, "security-headers.conf");
+    await writeFile(
+      brokenServing,
+      "server {\n    listen 8080;\n    this is not valid nginx syntax ;;;\n}\n",
     );
+    await writeFile(brokenHeaders, "");
+    const dirsBefore = await listConfDirs();
     try {
-      await expect(instance.stop()).rejects.toThrow(/failed to remove/);
-      expect(failures).toHaveLength(1);
-      // 失败后通过重试入口恢复真实删除，完成清理。
-      await instance.retryCleanupAfterFailure();
+      // nginx -t 必须失败，且失败路径删除本次创建的 configDir。
+      await expect(
+        serveWithNginx(
+          nginxBinary,
+          build.distRoot,
+          brokenServing,
+          brokenHeaders,
+          await findFreePort(),
+        ),
+      ).rejects.toThrow(/exited with/);
+      const dirsAfter = await listConfDirs();
+      const added = dirsAfter.filter((dir) => !dirsBefore.includes(dir));
+      expect(added).toEqual([]);
     } finally {
-      // 重试已成功删除目录；再次重试的 ENOENT 视为已清理完成。
-      await instance.retryCleanupAfterFailure().catch((error: unknown) => {
-        if (!/ENOENT/.test((error as Error).message)) throw error;
-      });
+      await rm(brokenRoot, { recursive: true, force: true });
     }
-    const { stat } = await import("node:fs/promises");
-    await expect(stat(instance.configDir)).rejects.toThrow();
+  });
+
+  it("rejects an invalid binary at spawn and still cleans the configDir", async () => {
+    const dirsBefore = await listConfDirs();
+    // binary 不存在：spawn error 路径，目录必须被删除。
+    await expect(
+      serveWithNginx(
+        join(tmpdir(), "devhot-no-such-binary", "nginx"),
+        build.distRoot,
+        join(projectRoot, "deploy", "nginx-serving.conf"),
+        join(projectRoot, "deploy", "security-headers.conf"),
+        await findFreePort(),
+      ),
+    ).rejects.toThrow();
+    const dirsAfter = await listConfDirs();
+    const added = dirsAfter.filter((dir) => !dirsBefore.includes(dir));
+    expect(added).toEqual([]);
   });
 
   it(
     "preserves both startup and cleanup errors when both fail",
     { timeout: 30_000 },
     async () => {
-      // 启动必然失败：端口被一个永不释放的占位服务占用。
+      // 启动失败（端口被占）+ cleanup 失败（removeConfigDir 注入）：
+      // 两类错误都必须保留在 AggregateError 中。
       const { createServer } = await import("node:net");
       const blocker = createServer((socket) => {
-        // 立即挂断：端口可连接但永远不会有 HTTP 响应，nginx 无法绑定。
         socket.destroy();
       });
       await new Promise<void>((resolvePromise) =>
@@ -348,31 +455,61 @@ describe("pinned nginx runtime process lifecycle", () => {
       );
       const blockedPort = (blocker.address() as { port: number }).port;
       const nginxBinary = await ensureNginxRuntime();
-      // 让 cleanup 也失败：把系统临时目录中的本测试 configDir 父目录变只读
-      // 不可行（影响面太大），改为对 broken 配置场景断言启动错误完整抛出。
+      // serveWithNginx 失败抛出后拿不到实例句柄，因此记录目录集合，在
+      // finally 中只清理本测试新出现的 devhot-nginx-conf-*（注入失败被
+      // 有意保留的那一个）。
+      const dirsBefore = await listConfDirs();
       try {
-        await expect(
-          serveWithNginx(
-            nginxBinary,
-            build.distRoot,
-            join(projectRoot, "deploy", "nginx-serving.conf"),
-            join(projectRoot, "deploy", "security-headers.conf"),
-            blockedPort,
+        const attempt = serveWithNginx(
+          nginxBinary,
+          build.distRoot,
+          join(projectRoot, "deploy", "nginx-serving.conf"),
+          join(projectRoot, "deploy", "security-headers.conf"),
+          blockedPort,
+          {
+            removeConfigDir: async () => {
+              throw new Error("EACCES: simulated remove failure");
+            },
+          },
+        );
+        const thrown = await attempt.then(
+          () => undefined,
+          (error: unknown) => error,
+        );
+        expect(thrown).toBeInstanceOf(AggregateError);
+        const aggregate = thrown as AggregateError;
+        const messages = aggregate.errors.map((error) => (error as Error).message);
+        // startup/readiness 错误与 cleanup/remove 错误都必须在场。
+        expect(
+          messages.some((message) =>
+            /did not become reachable|exited before readiness/.test(message),
           ),
-        ).rejects.toSatisfy((error: unknown) => {
-          // 启动错误必须完整抛出；若 cleanup 同时失败，两类错误都必须保留。
-          const message = (error as Error).message;
-          return (
-            /did not become reachable/.test(message) ||
-            /startup failed and cleanup failed/.test(message) ||
-            error instanceof AggregateError
-          );
-        });
+          `missing startup error in ${JSON.stringify(messages)}`,
+        ).toBe(true);
+        expect(
+          messages.some((message) => /failed to remove|remove failure/.test(message)),
+          `missing cleanup error in ${JSON.stringify(messages)}`,
+        ).toBe(true);
       } finally {
         await new Promise<void>((resolvePromise) =>
           blocker.close(() => resolvePromise()),
         );
+        const { rm } = await import("node:fs/promises");
+        for (const dir of await listConfDirs()) {
+          if (!dirsBefore.includes(dir)) {
+            await rm(join(tmpdir(), dir), { recursive: true, force: true });
+          }
+        }
       }
     },
   );
 });
+
+// 进程树断言（目录可能仍存在，用于 removeConfigDir 失败场景）。
+const assertProcessTreeGone = async (instance: NginxServer): Promise<void> => {
+  const pids = await listDevhotNginxPids();
+  expect(
+    pids.includes(instance.masterPid),
+    `master pid ${instance.masterPid} still alive after stop`,
+  ).toBe(false);
+};
