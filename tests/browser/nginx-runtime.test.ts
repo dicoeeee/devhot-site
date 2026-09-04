@@ -111,11 +111,12 @@ const assertNoNewResidue = async (context: string): Promise<void> => {
 /** 每个实例 stop() 后的完整断言：进程树、端口、目录全部消失。 */
 const assertInstanceGone = async (instance: NginxServer): Promise<void> => {
   const pids = await listDevhotNginxPids();
-  const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,command"]);
+  const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,stat,command"]);
   const workers = stdout
     .split("\n")
     .filter(
       (line) =>
+        !/^\s*\d+\s+\d+\s+Z/.test(line) &&
         line.includes("nginx: worker process") &&
         (line.includes(String(instance.masterPid)) || line.includes(instance.configDir)),
     );
@@ -480,7 +481,7 @@ describe("pinned nginx runtime process lifecycle", () => {
     { timeout: 30_000 },
     async () => {
       const { createServer } = await import("node:http");
-      const blocker = createServer((request, response) => {
+      const blocker = createServer((_request, response) => {
         response.writeHead(200, { "content-type": "text/plain" });
         response.end("foreign placeholder");
       });
@@ -546,7 +547,7 @@ describe("pinned nginx runtime process lifecycle", () => {
       const { createServer } = await import("node:http");
       // 正常响应 HTTP 的占位服务（不是立即断开的 socket）：端口被无关服务
       // 持有时，本实例 nginx 启动失败，但清理不得把无关监听者当作自身残留。
-      const blocker = createServer((request, response) => {
+      const blocker = createServer((_request, response) => {
         response.writeHead(200, { "content-type": "text/plain" });
         response.end("foreign placeholder");
       });

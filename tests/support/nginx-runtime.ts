@@ -153,11 +153,16 @@ const STOP_TIMEOUT_MS = 10_000;
 
 /** 枚举本仓库固定运行时启动的全部 nginx 进程 PID（master 与 worker）。 */
 export const listDevhotNginxPids = async (): Promise<readonly number[]> => {
-  const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
+  const { stdout } = await execFileAsync("ps", ["-eo", "pid,stat,command"]);
   const pids: number[] = [];
   for (const line of stdout.split("\n")) {
-    const match = line.match(/^\s*(\d+)\s+(.*)$/);
-    if (match?.[2]?.includes(`devhot-nginx-${NGINX_VERSION}`)) {
+    const match = line.match(/^\s*(\d+)\s+(\S+)\s+(.*)$/);
+    // 僵尸（Z 态）不算存活进程。
+    if (
+      match &&
+      !(match[2] ?? "").startsWith("Z") &&
+      match[3]?.includes(`devhot-nginx-${NGINX_VERSION}`)
+    ) {
       pids.push(Number(match[1]));
     }
   }
@@ -218,9 +223,10 @@ export const serveWithNginx = async (
         "-p",
         String(child.pid),
         "-o",
-        "command=",
+        "stat=,command=",
       ]);
-      return stdout.includes(configDir);
+      // 僵尸态（Z）不算存活；命令行须属于本实例配置。
+      return !stdout.trim().startsWith("Z") && stdout.includes(configDir);
     } catch {
       return false;
     }
@@ -245,10 +251,13 @@ export const serveWithNginx = async (
     return workers;
   };
 
+  // 存活检查排除僵尸态：分离进程组的子进程退出后可能短暂成为僵尸
+  // （Z 状态，ps 仍列出），僵尸不属于“存活”，不得据此判定清理失败。
   const pidAlive = async (pid: number): Promise<boolean> => {
     try {
-      await execFileAsync("ps", ["-p", String(pid)]);
-      return true;
+      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "stat="]);
+      const state = stdout.trim();
+      return state.length > 0 && !state.startsWith("Z");
     } catch {
       return false;
     }
@@ -353,15 +362,17 @@ export const serveWithNginx = async (
   }> => {
     const allPids = await listDevhotNginxPids();
     const masterAlive = child?.pid !== undefined && allPids.includes(child.pid);
-    const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,command"]);
+    const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,stat,command"]);
     const workersAlive: number[] = [];
     for (const line of stdout.split("\n")) {
-      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
       if (!match) continue;
       const pid = Number(match[1]);
       const ppid = Number(match[2]);
-      const command = match[3] ?? "";
+      const state = match[3] ?? "";
+      const command = match[4] ?? "";
       if (
+        state.startsWith("Z") === false &&
         command.includes("nginx: worker process") &&
         (ppid === child?.pid || command.includes(configDir))
       ) {
