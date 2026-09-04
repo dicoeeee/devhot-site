@@ -162,7 +162,10 @@ export const scanHtmlSecurity = (html: string, path: string): void => {
       const isJavaScriptMime =
         type !== undefined &&
         (type.includes("javascript") || type.includes("ecmascript") || type === "module");
-      const isDeclaredDataBlock = type === "application/json" || type === "importmap";
+      // 数据块白名单仅 application/json：import map 影响模块解析并受
+      // 脚本 CSP 约束（现有 CSP 不含 inline script），不得按普通 JSON
+      // 数据块免检；如未来确需支持须另行明确映射校验与 CSP 方案。
+      const isDeclaredDataBlock = type === "application/json";
       const executable = !isDeclaredDataBlock;
       if (executable) {
         const src = attributes.get("src");

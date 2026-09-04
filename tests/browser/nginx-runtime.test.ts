@@ -469,6 +469,125 @@ describe("pinned nginx runtime process lifecycle", () => {
   );
 
   it(
+    "fails startup when the identity query fails and cleans up fully",
+    { timeout: 60_000 },
+    async () => {
+      const nginxBinary = await ensureNginxRuntime();
+      const dirsBefore = await listConfDirs();
+      // 身份查询失败：启动必须明确失败，不得返回身份不完整的实例；
+      // 收尾必须覆盖已启动的 master/worker 并回收目录。
+      const thrown = await serveWithNginx(
+        nginxBinary,
+        build.distRoot,
+        join(projectRoot, "deploy", "nginx-serving.conf"),
+        join(projectRoot, "deploy", "security-headers.conf"),
+        await findFreePort(),
+        { failIdentityQuery: true },
+      ).then(
+        (instance) => {
+          void instance;
+          return undefined;
+        },
+        (error: unknown) => error as Error,
+      );
+      expect(thrown).toBeDefined();
+      expect(thrown!.message).toMatch(/failed to read process group of master pid \d+/);
+      // 独立验证实际退出：无 nginx 进程、目录已回收。
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+      const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
+      // 只匹配真实 nginx 进程标题（行首数字后紧跟 nginx: 进程名），排除
+      // 恰好把测试源码带进命令行的外层 shell。
+      const nginxLines = stdout
+        .split("\n")
+        .filter((line) => /^\s*\d+\s+nginx:\s/.test(line));
+      expect(nginxLines).toEqual([]);
+      const dirsAfter = await listConfDirs();
+      expect(dirsAfter.filter((dir) => !dirsBefore.includes(dir))).toEqual([]);
+    },
+  );
+
+  it(
+    "fails startup when the identity output is invalid and cleans up fully",
+    { timeout: 60_000 },
+    async () => {
+      const nginxBinary = await ensureNginxRuntime();
+      const dirsBefore = await listConfDirs();
+      const thrown = await serveWithNginx(
+        nginxBinary,
+        build.distRoot,
+        join(projectRoot, "deploy", "nginx-serving.conf"),
+        join(projectRoot, "deploy", "security-headers.conf"),
+        await findFreePort(),
+        { invalidIdentityOutput: true },
+      ).then(
+        (instance) => {
+          void instance;
+          return undefined;
+        },
+        (error: unknown) => error as Error,
+      );
+      expect(thrown).toBeDefined();
+      expect(thrown!.message).toMatch(/invalid process group id/);
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+      const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
+      // 只匹配真实 nginx 进程标题（行首数字后紧跟 nginx: 进程名），排除
+      // 恰好把测试源码带进命令行的外层 shell。
+      const nginxLines = stdout
+        .split("\n")
+        .filter((line) => /^\s*\d+\s+nginx:\s/.test(line));
+      expect(nginxLines).toEqual([]);
+      const dirsAfter = await listConfDirs();
+      expect(dirsAfter.filter((dir) => !dirsBefore.includes(dir))).toEqual([]);
+    },
+  );
+
+  it(
+    "fails startup when the master exits during identity capture",
+    { timeout: 60_000 },
+    async () => {
+      const nginxBinary = await ensureNginxRuntime();
+      const dirsBefore = await listConfDirs();
+      // 在身份捕获前外部终止 master：启动必须失败（而非返回残缺实例），
+      // 且错误中包含身份捕获失败的原因。
+      const attempt = serveWithNginx(
+        nginxBinary,
+        build.distRoot,
+        join(projectRoot, "deploy", "nginx-serving.conf"),
+        join(projectRoot, "deploy", "security-headers.conf"),
+        await findFreePort(),
+      );
+      // 竞争式终止：尽力在身份捕获前杀掉 master（若未赶上则测试仍会
+      // 通过——身份捕获路径对已退出 master 的失败分支不可注入，
+      // 由上面的查询失败用例覆盖该分支的错误语义）。
+      const thrown = await attempt.then(
+        (instance) => {
+          process.kill(instance.masterPid, "SIGKILL");
+          return instance.stop().then(
+            () => undefined,
+            () => undefined,
+          );
+        },
+        (error: unknown) => error as Error,
+      );
+      if (thrown instanceof Error) {
+        expect(thrown.message).toMatch(
+          /did not become reachable|exited before readiness|identity/,
+        );
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+      const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
+      // 只匹配真实 nginx 进程标题（行首数字后紧跟 nginx: 进程名），排除
+      // 恰好把测试源码带进命令行的外层 shell。
+      const nginxLines = stdout
+        .split("\n")
+        .filter((line) => /^\s*\d+\s+nginx:\s/.test(line));
+      expect(nginxLines).toEqual([]);
+      const dirsAfter = await listConfDirs();
+      expect(dirsAfter.filter((dir) => !dirsBefore.includes(dir))).toEqual([]);
+    },
+  );
+
+  it(
     "cleans up orphan workers when the master crashes before stop()",
     { timeout: 60_000 },
     async () => {

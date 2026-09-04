@@ -298,6 +298,12 @@ describe("publication output", () => {
       '<script type="text/javascript1.5">globalThis.__probe = true;</script>',
       "inline executable script",
     ],
+    // import map 影响模块解析且受脚本 CSP 约束：即使完全同源也必须被
+    // 当前产物门禁拒绝（现有 CSP 不含 inline script）。
+    [
+      '<script type="importmap">{"imports":{"probe":"/scripts/timeline.js"}}</script>',
+      "inline executable script",
+    ],
     // 未知 type 不得默认当作数据块放行（保守按可执行处理）。
     [
       '<script type="application/x-unknown">globalThis.__probe = true;</script>',
@@ -502,6 +508,20 @@ describe("publication output", () => {
     await expect(
       verifyDistribution({ distRoot: distRoot, requireSevenPageRelease: true }),
     ).resolves.toEqual(expect.objectContaining({ schemaVersion: 1 }));
+  });
+
+  it("still allows a same-origin external module script", async () => {
+    // 同源外置模块（type="module" + 站内 src）是合法发布形态（当前
+    // 候选的时间线脚本即此类），必须继续放行——收紧脚本类型规则不
+    // 得误伤它。
+    const tamperedDist = await newTamperedDist();
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await appendFile(
+      join(tamperedDist, ...defaultDomainOutputSegments, "index.html"),
+      '<script type="module" src="/scripts/timeline.js"></script>',
+    );
+
+    await expect(verifyDistribution({ distRoot: tamperedDist })).resolves.toBeTruthy();
   });
 
   it("still allows a JSON data-block script", async () => {
