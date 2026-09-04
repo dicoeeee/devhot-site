@@ -222,15 +222,68 @@ describe("pinned nginx runtime security and cache policy", () => {
     }
   });
 
-  it("serves missing hashed assets as 404 with revalidation, never immutable", async () => {
-    // 两个哈希资源路径下的 404 都必须重验证并保留全部安全头，
-    // 绝不能继承 immutable 一年缓存。
+  it("serves hashed-asset error responses with revalidation, never immutable", async () => {
+    // 404（缺失）：两个哈希资源路径都必须重验证并保留全部安全头。
     for (const path of ["/media/sha256/missing.png", "/_astro/missing.abc123.css"]) {
       const result = await probe(`${server.origin}${path}`);
       expect(result.status, path).toBe(404);
       expectSecurityHeaders(result);
       expect(result.headers["cache-control"], path).toBe("no-cache, must-revalidate");
     }
+
+    // 403（存在但不可读）：在两个路径下各放一个 000 模式文件。
+    const { chmod, writeFile } = await import("node:fs/promises");
+    const forbidden = [
+      { asset: mediaAsset, name: "forbidden-media.png" },
+      { asset: astroAsset, name: "forbidden-astro.css" },
+    ];
+    const { cp } = await import("node:fs/promises");
+    const { resolve: resolvePath } = await import("node:path");
+    const distRootAbs = server.configDir;
+    for (const target of forbidden) {
+      const source = join(distRootAbs, "dist", target.asset);
+      const dest = join(
+        distRootAbs,
+        "dist",
+        resolvePath(target.asset, ".."),
+        target.name,
+      );
+      await cp(source, dest);
+      await chmod(dest, 0o000);
+    }
+    try {
+      for (const target of forbidden) {
+        const path = `${resolvePath(target.asset, "..")}/${target.name}`;
+        const result = await probe(`${server.origin}/${path}`);
+        expect(result.status, path).toBe(403);
+        expectSecurityHeaders(result);
+        expect(result.headers["cache-control"], path).toBe("no-cache, must-revalidate");
+      }
+    } finally {
+      // worker 以降权用户运行，恢复模式以便 teardown 删除临时 dist。
+      for (const target of forbidden) {
+        const path = join(
+          distRootAbs,
+          "dist",
+          resolvePath(target.asset, ".."),
+          target.name,
+        );
+        await chmod(path, 0o644).catch(() => {});
+      }
+    }
+
+    // 416（越界 Range）：已有资源 + 不可满足的 Range 请求。nginx 对 416 的
+    // 响应头过滤阶段可能重复追加同名头，断言以“绝不允许 immutable”为准。
+    const rangeResponse = await fetch(`${server.origin}/${astroAsset}`, {
+      headers: { Range: "bytes=999999999-1000000000" },
+    });
+    await rangeResponse.arrayBuffer();
+    expect(rangeResponse.status).toBe(416);
+    expect(rangeResponse.headers.get("cache-control")).toContain(
+      "no-cache, must-revalidate",
+    );
+    expect(rangeResponse.headers.get("cache-control")).not.toContain("immutable");
+    expect(rangeResponse.headers.get("content-security-policy")).toBeTruthy();
   });
 
   it("keeps security headers on 404 responses", async () => {
@@ -346,6 +399,44 @@ describe("pinned nginx runtime process lifecycle", () => {
         await instance.stop();
       }
       await assertInstanceGone(instance);
+    },
+  );
+
+  it(
+    "cleans up orphan workers when the master crashes before stop()",
+    { timeout: 60_000 },
+    async () => {
+      const instance = await startInstance();
+      // 记录启动时已捕获的本实例 worker（master 存活时按 PPID 识别）。
+      const { stdout: before } = await execFileAsync("ps", ["-eo", "pid,ppid,command"]);
+      const workersAtStart = before
+        .split("\n")
+        .map((line) => line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/))
+        .filter(
+          (match): match is RegExpMatchArray =>
+            match !== null &&
+            Number(match[2]) === instance.masterPid &&
+            (match[3] ?? "").includes("nginx: worker process"),
+        )
+        .map((match) => Number(match[1]));
+      expect(workersAtStart.length).toBeGreaterThan(0);
+
+      // 模拟 master 在 stop() 之前崩溃（外部 SIGKILL，不经 stop() 路径）。
+      process.kill(instance.masterPid, "SIGKILL");
+      try {
+        await instance.stop();
+        // stop() 成功即代表本实例 worker 与监听资源全部释放。
+        const pids = await listDevhotNginxPids();
+        expect(pids, "orphan workers must be gone after stop()").not.toContain(
+          instance.masterPid,
+        );
+        for (const workerPid of workersAtStart) {
+          expect(pids).not.toContain(workerPid);
+        }
+        await assertInstanceGone(instance);
+      } finally {
+        await instance.retryCleanupAfterFailure();
+      }
     },
   );
 

@@ -115,11 +115,27 @@ describe("serving security and cache policy", () => {
         ),
     ],
     [
-      "drops the immutable marker from content-addressed assets",
+      "drops the range-aware cache map from content-addressed assets",
       (config: string) =>
         config.replace(
+          "location /media/sha256/ {\n        include deploy/security-headers.conf;\n        add_header Cache-Control $hashed_cache_control always;",
+          "location /media/sha256/ {\n        include deploy/security-headers.conf;",
+        ),
+    ],
+    [
+      "hardcodes a literal cache policy instead of the range-aware map on content-addressed assets",
+      (config: string) =>
+        config.replace(
+          "location /media/sha256/ {\n        include deploy/security-headers.conf;\n        add_header Cache-Control $hashed_cache_control always;",
           'location /media/sha256/ {\n        include deploy/security-headers.conf;\n        add_header Cache-Control "public, max-age=31536000, immutable" always;',
-          'location /media/sha256/ {\n        include deploy/security-headers.conf;\n        add_header Cache-Control "public, max-age=31536000" always;',
+        ),
+    ],
+    [
+      "stops revalidating hashed-asset Range requests (drops the range map)",
+      (config: string) =>
+        config.replace(
+          'map $http_range $hashed_cache_control {\n    default            "public, max-age=31536000, immutable";\n    ~.+                "no-cache, must-revalidate";\n}',
+          'map $http_range $hashed_cache_control {\n    default            "public, max-age=31536000, immutable";\n}',
         ),
     ],
     [

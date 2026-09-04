@@ -89,7 +89,8 @@ export const ensureNginxRuntime = async (): Promise<string> => {
     [
       `--prefix=${runtimeRoot}`,
       `--sbin-path=${nginxBinary}`,
-      "--without-http_rewrite_module",
+      // rewrite 模块必须启用：error_page/内部重定向按状态改写缓存策略
+      // 依赖它；此前为最小化构建而排除。
       "--without-http_gzip_module",
     ],
     sourceRoot,
@@ -232,10 +233,13 @@ export const serveWithNginx = async (
     }
   };
 
-  // 本实例 worker 枚举：master 存活时按 PPID=master 识别；master 已死后按
-  // 预先捕获的 PID 追踪（worker cmdline 不含 configDir，无法事后识别）。
-  const workerPidsUnderMaster = async (): Promise<readonly number[]> => {
-    if (!child?.pid) return [];
+  // 本实例 worker 身份追踪：worker cmdline 不含 configDir，master 死后也
+  // 无法再按 PPID 识别，因此必须在启动成功后（master 存活时）立即捕获，
+  // 此后在每次清理开始时若 master 仍存活则刷新（覆盖新 fork 的 worker），
+  // master 已死时沿用最近一次已知集合追踪孤儿 worker。
+  let knownWorkerPids: readonly number[] = [];
+  const refreshWorkersUnderMaster = async (): Promise<readonly number[]> => {
+    if (!child?.pid) return knownWorkerPids;
     const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,command"]);
     const workers: number[] = [];
     for (const line of stdout.split("\n")) {
@@ -248,7 +252,10 @@ export const serveWithNginx = async (
         workers.push(pid);
       }
     }
-    return workers;
+    if (workers.length > 0) {
+      knownWorkerPids = workers;
+    }
+    return knownWorkerPids;
   };
 
   // 存活检查排除僵尸态：分离进程组的子进程退出后可能短暂成为僵尸
@@ -282,8 +289,9 @@ export const serveWithNginx = async (
       }
     };
 
-    // master 存活时先捕获 worker PID（master 被杀后无法再识别孤儿 worker）。
-    const trackedWorkers = await workerPidsUnderMaster();
+    // worker 身份已在启动时捕获；master 仍存活时刷新（新 fork worker），
+    // master 已提前退出时沿用最近已知集合——孤儿 worker 仍可被追踪终止。
+    let trackedWorkers = await refreshWorkersUnderMaster();
 
     if (await masterAlive()) {
       signal("SIGTERM");
@@ -362,6 +370,9 @@ export const serveWithNginx = async (
   }> => {
     const allPids = await listDevhotNginxPids();
     const masterAlive = child?.pid !== undefined && allPids.includes(child.pid);
+    // master 存活时刷新已知 worker 集合（覆盖新 fork）；已捕获的历史集合
+    // 始终保留——master 提前崩溃后被 init 接管的孤儿 worker 只能靠它追踪。
+    await refreshWorkersUnderMaster();
     const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,stat,command"]);
     const workersAlive: number[] = [];
     for (const line of stdout.split("\n")) {
@@ -374,7 +385,9 @@ export const serveWithNginx = async (
       if (
         state.startsWith("Z") === false &&
         command.includes("nginx: worker process") &&
-        (ppid === child?.pid || command.includes(configDir))
+        (ppid === child?.pid ||
+          command.includes(configDir) ||
+          knownWorkerPids.includes(pid))
       ) {
         workersAlive.push(pid);
       }
@@ -395,11 +408,16 @@ export const serveWithNginx = async (
       portListening = (error as Error).name === "TimeoutError";
     }
     if (portListening) {
-      if (!masterAlive && workersAlive.length === 0) {
-        // 本实例进程树已全部退出：端口必然由无关服务持有（例如测试占位
-        // 服务），不属于本实例，不得据此拒绝回收自身目录。
+      // 监听者若是本实例已知 worker（含 master 崩溃后的孤儿），端口属于
+      // 本实例，不得放行。
+      if (workersAlive.length > 0 || masterAlive) {
+        portOwnedByInstance = true;
+      } else if (knownWorkerPids.length === 0 && !masterAlive) {
+        // 从未捕获到任何 worker 且 master 已退：端口必然由无关服务持有
+        // （例如测试占位服务），不属于本实例，不得据此拒绝回收自身目录。
         portOwnedByInstance = false;
       } else {
+        // master 已退但曾捕获过 worker：归属未定，必须用监听进程身份确认。
         try {
           const { stdout: lsofOut } = await execFileAsync("lsof", [
             "-nP",
@@ -413,7 +431,12 @@ export const serveWithNginx = async (
             .filter((pid) => Number.isInteger(pid) && pid > 0);
           portOwnedByInstance =
             listenerPids.length > 0 &&
-            listenerPids.some((pid) => pid === child?.pid || workersAlive.includes(pid));
+            listenerPids.some(
+              (pid) =>
+                pid === child?.pid ||
+                workersAlive.includes(pid) ||
+                knownWorkerPids.includes(pid),
+            );
         } catch {
           // lsof 不可用且进程树未确认退出：保守视为仍被持有。
           portOwnedByInstance = true;
@@ -617,6 +640,9 @@ export const serveWithNginx = async (
         ),
       );
     }
+    // 启动成功即捕获 worker 身份：master 若在 stop() 前崩溃，worker 会被
+    // init 接管、无法再按 PPID 识别，必须依赖此时捕获的 PID 集合追踪。
+    await refreshWorkersUnderMaster();
   } catch (error) {
     if (handlingSetupFailure) {
       // cleanupOnSetupFailure 已经完成包装并抛出，直接上抛。

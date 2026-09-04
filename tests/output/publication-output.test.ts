@@ -339,8 +339,12 @@ describe("publication output", () => {
     '\nfetch("https:example.invalid/collect");\n',
     '\nfetch("https:/example.invalid/collect");\n',
     '\nfetch("/\\\\example.invalid/collect");\n',
+    '\nfetch("\\\\\\\\example.invalid/collect");\n',
+    '\nfetch("\\\\\/example.invalid/collect");\n',
     "\nfetch(`https:example.invalid/collect`);\n",
+    "\nfetch(`\\\\\\\\example.invalid/collect`);\n",
     '\nconst img = document.createElement("img"); img.src = "https:example.invalid/x.png";\n',
+    '\nconst img2 = document.createElement("img"); img2.src = "\\\\\\\\example.invalid/x.png";\n',
   ])(
     "rejects a distributed script that opens a third-party connection via %s",
     async (payload) => {
@@ -433,6 +437,42 @@ describe("publication output", () => {
       verifyDistribution({ distRoot: withoutTags, requireSevenPageRelease: true }),
     ).rejects.toThrow(/broken internal link|seven-page release candidate requires/);
   });
+
+  it(
+    "accepts a complete candidate after swapping in different legitimate content identities",
+    { timeout: 240_000 },
+    async () => {
+      // 换用另一组合法洞察/来源 ID（引用、文件摘要、manifest identity 同步
+      // 由 fixture 生成器产出）：七页面候选验收必须无需任何测试改动即通过，
+      // 证明门禁不依赖示例内容身份。
+      const fixture = await writePublicationFixture({
+        evidenceReadingContract: true,
+        tagDetailContract: true,
+        insightId: "insight-a1b2c3d4e5f60718293a4b5c",
+        sourceId: "source-0f9e8d7c6b5a432112345678",
+      });
+      createdTempRoots.push(fixture.root);
+      const buildRoot = await trackedBuildRoot(() => prepareStaticBuild(fixture.root));
+      await execFileAsync(
+        process.execPath,
+        [join(projectRoot, "node_modules", "astro", "bin", "astro.mjs"), "build"],
+        { cwd: buildRoot },
+      );
+      await copyDeclaredAssets({
+        inputRoot: fixture.root,
+        distRoot: join(buildRoot, "dist"),
+      });
+
+      const metadata = await verifyDistribution({
+        distRoot: join(buildRoot, "dist"),
+        requireSevenPageRelease: true,
+      });
+      expect(metadata.routes).toContain("/timeline/");
+      expect(metadata.routes.some((route) => route.startsWith("/tags/"))).toBe(true);
+      expect(metadata.routes).toContain(`/insights/insight-a1b2c3d4e5f60718293a4b5c/`);
+      expect(metadata.routes).toContain(`/sources/source-0f9e8d7c6b5a432112345678/`);
+    },
+  );
 
   it("verifies the final candidate dist as a complete seven-page release", async () => {
     // 最终候选 dist（npm run build 产物）必须通过七页面完整性验收。

@@ -242,23 +242,28 @@ export const scanHtmlSecurity = (html: string, path: string): void => {
 //   可静态确定的 computed property）一律拒绝，不论参数来源；
 // - 并保留 service worker 注册与内联事件处理属性的既有拒绝策略。
 // 按 URL 解析结果判断外部性：`https:example.invalid/x`、`https:/example.invalid/x`、
-// `/\example.invalid/x` 在浏览器 URL 解析下都是外部 https 请求，仅匹配 `://`
-// 或 `//` 前缀会漏报。仅对“看起来像引用”的值（已知 scheme 开头或以 / 开头）
-// 走判定，避免把普通字符串（如时间 `T00:00:00Z`）误判成外部 host；
+// `\\example.invalid/x`、`/\example.invalid/x` 在浏览器 URL 解析下都是外部
+// 请求，仅匹配 `://` 或 `//` 前缀会漏报。仅对“看起来像引用”的值（已知
+// scheme 开头，或以正斜杠/反斜杠开头——浏览器把反斜杠当斜杠解析）走判定，
+// 避免把普通字符串（如时间 `T00:00:00Z`）误判成外部 host；
 // data:/blob: 属 CSP 允许的内联载荷，不算外部。
 const isExternalScriptUrl = (value: string): boolean => {
   const normalized = normalizeUrlValue(value);
   if (normalized === "") return false;
+  // WHATWG 浏览器解析中，反斜杠在特殊 scheme 下等价于正斜杠
+  // （\\example.invalid 与 //example.invalid 同为外部协议相对地址），
+  // 因此以反斜杠开头的值同样进入引用判定，不得被前缀筛选提前放行。
   const looksLikeReference =
-    /^(?:https?|wss?|data|blob):/i.test(normalized) || normalized.startsWith("/");
+    /^(?:https?|wss?|data|blob):/i.test(normalized) || /[/\\]/.test(normalized[0] ?? "");
   if (!looksLikeReference) return false;
   // 任何 http(s)/ws(s) scheme 形态（含 https:、https:/ 等变体）都指向外部
   // 站点（本站运行时只允许同源相对路径）。
   if (/^(?:https?|wss?):/i.test(normalized)) return true;
-  if (normalized.startsWith("//")) return true;
+  if (/^[/\\]{2}/.test(normalized)) return true;
   if (/^(?:data|blob):/i.test(normalized)) return false;
   try {
-    const parsed = new URL(normalized, "http://devhot.invalid/");
+    // 浏览器把反斜杠当作斜杠解析：先统一再判定 origin。
+    const parsed = new URL(normalized.replace(/\\/g, "/"), "http://devhot.invalid/");
     return parsed.origin !== "http://devhot.invalid";
   } catch {
     return false;

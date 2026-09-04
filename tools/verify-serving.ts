@@ -138,46 +138,66 @@ export const verifyServing = async ({
         );
       }
     } else {
-      if (
-        !block.includes(
-          'add_header Cache-Control "public, max-age=31536000, immutable" always;',
-        )
-      ) {
-        throw new Error(`content-addressed path must be cached immutably: ${location}`);
-      }
-      // 哈希资源路径必须显式 try_files ... =404，缺失文件进入 404 处理，
-      // 不得把 immutable 缓存套在 404 响应上。
-      if (!/try_files\s+\$uri\s+=404;/.test(block)) {
+      // 哈希资源路径不得声明 try_files $uri =404：它会把“存在但不可读”
+      // 的 403 强转成 404。缺失与不可读由静态模块按真实状态返回，并统一
+      // 经 error_page 分流到 @hashed_error（重验证）。
+      if (/try_files/.test(block)) {
         throw new Error(
-          `content-addressed path must fail closed to 404 for missing assets: ${location}`,
+          `content-addressed path must let the static module surface the true status: ${location}`,
         );
       }
     }
   }
 
-  // 哈希资源 404 必须重验证并保留全部安全头：error_page 指向命名 location，
-  // 该 location 重复 include 安全头片段并声明 no-cache。
-  const hashedMissingBlock = extractBlock(config, "location @hashed_missing {");
-  if (!hashedMissingBlock) {
+  // 哈希资源错误响应的缓存策略按请求/响应形态决定，不允许单一状态特例：
+  // - 404/403 经 error_page 内部重定向到 @hashed_error：重验证 + 安全头；
+  // - 416 无法在原始 location 之外剥离已应用的 immutable，改由
+  //   map($http_range) 在源头对一切带 Range 的请求（206/416）使用重验证。
+  const hashedErrorBlock = extractBlock(config, "location @hashed_error {");
+  if (!hashedErrorBlock) {
     throw new Error(
-      "serving config must route hashed-asset 404s to @hashed_missing for revalidation",
+      "serving config must route hashed-asset 404/403 to @hashed_error for revalidation",
     );
   }
-  if (!/error_page\s+404\s+@hashed_missing;/.test(config)) {
-    throw new Error("serving config must declare error_page 404 @hashed_missing");
+  if (!/error_page\s+404\s+403\s+@hashed_error;/.test(config)) {
+    throw new Error(
+      "serving config must map 404 and 403 on hashed paths to @hashed_error",
+    );
   }
-  if (!hashedMissingBlock.includes(snippetInclude)) {
-    throw new Error("@hashed_missing must re-include the security headers snippet");
+  if (!hashedErrorBlock.includes(snippetInclude)) {
+    throw new Error("@hashed_error must re-include the security headers snippet");
   }
   if (
-    !hashedMissingBlock.includes(
+    !hashedErrorBlock.includes(
       'add_header Cache-Control "no-cache, must-revalidate" always;',
     )
   ) {
-    throw new Error("@hashed_missing must serve 404s with revalidation");
+    throw new Error("@hashed_error must serve error responses with revalidation");
   }
-  if (/max-age=\d{4,}/.test(hashedMissingBlock)) {
-    throw new Error("@hashed_missing must not gain a long freshness window");
+  if (/max-age=\d{4,}/.test(hashedErrorBlock)) {
+    throw new Error("@hashed_error must not gain a long freshness window");
+  }
+  // Range 请求一律重验证（覆盖 416 越界与 206 部分内容）。
+  const rangeMapBlock = extractBlock(config, "map $http_range $hashed_cache_control {");
+  if (!rangeMapBlock) {
+    throw new Error("serving config must map hashed cache policy on $http_range");
+  }
+  if (
+    !rangeMapBlock.includes('default            "public, max-age=31536000, immutable";')
+  ) {
+    throw new Error("hashed-asset plain responses must be immutable");
+  }
+  if (!rangeMapBlock.includes('~.+                "no-cache, must-revalidate";')) {
+    throw new Error("hashed-asset Range requests must use revalidation");
+  }
+  // 哈希路径必须引用映射变量（不得写死 immutable 字面量）。
+  for (const path of immutablePaths) {
+    const block = extractBlock(config, path);
+    if (!block.includes("add_header Cache-Control $hashed_cache_control always;")) {
+      throw new Error(
+        `content-addressed path must derive cache policy from the range map: ${path}`,
+      );
+    }
   }
 };
 
