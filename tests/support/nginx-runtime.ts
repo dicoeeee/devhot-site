@@ -452,9 +452,12 @@ export const serveWithNginx = async (
             (pgid) => instancePgid !== undefined && pgid === instancePgid,
           );
         } catch {
-          // lsof 不可用：归属无法确认时保守视为本实例仍持有（清理失败），
-          // 不得当作无关放行。
-          portOwnedByInstance = true;
+          // lsof 不可用：以本实例进程组当前成员为准——组内已无存活进程
+          // （或从未捕获到组）时端口不可能属于本实例，视为无关；组内
+          // 仍有存活成员而无法确认监听者归属时，保守视为本实例仍持有
+          // （清理失败），不得当作无关放行。
+          portOwnedByInstance =
+            instancePgid !== undefined && (await instanceProcesses()).length > 0;
         }
       }
     }
