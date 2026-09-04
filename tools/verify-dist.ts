@@ -150,14 +150,20 @@ export const scanHtmlSecurity = (html: string, path: string): void => {
       throw new Error(`inline style block found in ${path}`);
     }
 
-    // 内联可执行脚本：type 缺省/module/text/javascript 且有正文即拒绝。
+    // 内联可执行脚本：按 HTML 脚本类型规则判定——type 缺省或空串都是
+    // JavaScript；任何 JavaScript MIME 变体（text/javascript、
+    // application/javascript、text/ecmascript、application/ecmascript、
+    // text/jscript、javascript1.x 等）同样可执行。只有本站显式声明的
+    // 数据块类型白名单（application/json）不算可执行；其余未知类型一律
+    // 按可执行处理（保守），不得因“不在已知清单中”而默认放行。
     if (tag === "script") {
-      const type = attributes.get("type")?.toLowerCase();
-      const executable =
-        type === undefined ||
-        type === "module" ||
-        type === "text/javascript" ||
-        type === "application/javascript";
+      const rawType = attributes.get("type");
+      const type = rawType?.toLowerCase().trim();
+      const isJavaScriptMime =
+        type !== undefined &&
+        (type.includes("javascript") || type.includes("ecmascript") || type === "module");
+      const isDeclaredDataBlock = type === "application/json" || type === "importmap";
+      const executable = !isDeclaredDataBlock;
       if (executable) {
         const src = attributes.get("src");
         if (src !== undefined && isExternalReference(src)) {

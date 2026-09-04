@@ -159,9 +159,40 @@ export const verifyServing = async ({
       "serving config must route hashed-asset 404/403 to @hashed_error for revalidation",
     );
   }
-  if (!/error_page\s+404\s+403\s+@hashed_error;/.test(config)) {
+  // error_page 必须覆盖全部 4xx/5xx（不得逐一枚举本轮发现的错误码），
+  // 且不得包含 3xx（304 等条件成功响应保持原语义）。
+  const errorPageMatch = config.match(/error_page\s+([\d\s]+)@hashed_error;/);
+  if (!errorPageMatch) {
     throw new Error(
-      "serving config must map 404 and 403 on hashed paths to @hashed_error",
+      "serving config must map hashed-asset errors to @hashed_error for revalidation",
+    );
+  }
+  const mappedStatuses = (errorPageMatch[1] ?? "")
+    .split(/\s+/)
+    .filter((token) => token.length > 0)
+    .map(Number)
+    .filter((code) => Number.isInteger(code) && code > 0);
+  const forbidden = mappedStatuses.filter((code) => code < 400);
+  if (forbidden.length > 0) {
+    throw new Error(
+      `error_page must not intercept success/redirect statuses: ${forbidden.join(",")}`,
+    );
+  }
+  for (const required of [400, 401, 403, 404, 405, 412, 413, 415, 416, 429, 500, 503]) {
+    if (!mappedStatuses.includes(required)) {
+      throw new Error(
+        `error_page must cover the full 4xx/5xx error space (missing ${required})`,
+      );
+    }
+  }
+  const allClientErrors = [
+    400, 401, 402, 403, 404, 405, 406, 407, 408, 409, 410, 411, 412, 413, 414, 415, 416,
+    417, 418, 421, 422, 423, 424, 425, 426, 428, 429, 431, 451,
+  ];
+  const missing = allClientErrors.filter((code) => !mappedStatuses.includes(code));
+  if (missing.length > 0) {
+    throw new Error(
+      `error_page must cover every 4xx client error (missing ${missing.join(",")})`,
     );
   }
   if (!hashedErrorBlock.includes(snippetInclude)) {

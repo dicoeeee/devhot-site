@@ -280,6 +280,29 @@ describe("publication output", () => {
       "<script>navigator.serviceWorker.register('/sw.js')</script>",
       "inline executable script",
     ],
+    // HTML 脚本类型规则：空 type 与 JavaScript MIME 变体都是可执行脚本。
+    ['<script type="">globalThis.__probe = true;</script>', "inline executable script"],
+    [
+      '<script type="text/ecmascript">globalThis.__probe = true;</script>',
+      "inline executable script",
+    ],
+    [
+      '<script type="application/ecmascript">globalThis.__probe = true;</script>',
+      "inline executable script",
+    ],
+    [
+      '<script type="text/jscript">globalThis.__probe = true;</script>',
+      "inline executable script",
+    ],
+    [
+      '<script type="text/javascript1.5">globalThis.__probe = true;</script>',
+      "inline executable script",
+    ],
+    // 未知 type 不得默认当作数据块放行（保守按可执行处理）。
+    [
+      '<script type="application/x-unknown">globalThis.__probe = true;</script>',
+      "inline executable script",
+    ],
   ])("rejects distribution HTML that contains %s", async (payload, expectedError) => {
     const tamperedDist = await newTamperedDist();
     await cp(distRoot, tamperedDist, { recursive: true });
@@ -479,6 +502,19 @@ describe("publication output", () => {
     await expect(
       verifyDistribution({ distRoot: distRoot, requireSevenPageRelease: true }),
     ).resolves.toEqual(expect.objectContaining({ schemaVersion: 1 }));
+  });
+
+  it("still allows a JSON data-block script", async () => {
+    // application/json 是声明式数据块（浏览器不执行），必须继续放行；
+    // 这是脚本类型规则收紧后的合法正向用例。
+    const tamperedDist = await newTamperedDist();
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await appendFile(
+      join(tamperedDist, ...defaultDomainOutputSegments, "index.html"),
+      '<script type="application/json">{"probe":true}</script>',
+    );
+
+    await expect(verifyDistribution({ distRoot: tamperedDist })).resolves.toBeTruthy();
   });
 
   it("still allows same-origin relative URLs in distributed scripts", async () => {

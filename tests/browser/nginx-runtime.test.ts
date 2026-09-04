@@ -108,25 +108,37 @@ const assertNoNewResidue = async (context: string): Promise<void> => {
   }
 };
 
-/** 每个实例 stop() 后的完整断言：进程树、端口、目录全部消失。 */
+/**
+ * 以进程组身份直接枚举本实例存活进程（ps 按 PGID 匹配，排除僵尸）：
+ * 不依赖“命令行含运行时路径”的清单——worker 命令行不含该路径，
+ * master 崩溃后也无法按 PPID/命令行识别孤儿。
+ */
+const instanceProcessPids = async (instance: NginxServer): Promise<number[]> => {
+  const { stdout } = await execFileAsync("ps", ["-eo", "pid,pgid,stat,command"]);
+  const pids: number[] = [];
+  for (const line of stdout.split("\n")) {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
+    if (!match) continue;
+    const pid = Number(match[1]);
+    const pgid = Number(match[2]);
+    const state = match[3] ?? "";
+    if (
+      pgid === instance.instancePgid &&
+      !state.startsWith("Z") &&
+      match[4]?.includes("nginx")
+    ) {
+      pids.push(pid);
+    }
+  }
+  return pids;
+};
+
+/** 每个实例 stop() 后的完整断言：进程组、端口、目录全部消失。 */
 const assertInstanceGone = async (instance: NginxServer): Promise<void> => {
-  const pids = await listDevhotNginxPids();
-  const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,stat,command"]);
-  const workers = stdout
-    .split("\n")
-    .filter(
-      (line) =>
-        !/^\s*\d+\s+\d+\s+Z/.test(line) &&
-        line.includes("nginx: worker process") &&
-        (line.includes(String(instance.masterPid)) || line.includes(instance.configDir)),
-    );
+  const survivors = await instanceProcessPids(instance);
   expect(
-    pids.includes(instance.masterPid),
-    `master pid ${instance.masterPid} still alive (configDir=${instance.configDir})`,
-  ).toBe(false);
-  expect(
-    workers,
-    `workers of master ${instance.masterPid} still alive (configDir=${instance.configDir})`,
+    survivors,
+    `processes of instance pgid ${instance.instancePgid} still alive: ${survivors.join(",")} (configDir=${instance.configDir})`,
   ).toEqual([]);
   await expect(
     stat(instance.configDir),
@@ -284,6 +296,60 @@ describe("pinned nginx runtime security and cache policy", () => {
     );
     expect(rangeResponse.headers.get("cache-control")).not.toContain("immutable");
     expect(rangeResponse.headers.get("content-security-policy")).toBeTruthy();
+
+    // 412（前置条件失败）：不匹配的 If-Match 与早于修改时间的
+    // If-Unmodified-Since。错误响应必须重验证，不得携带 immutable。
+    const head = await fetch(`${server.origin}/${astroAsset}`);
+    const etag = head.headers.get("etag") ?? "";
+    const lastModified = head.headers.get("last-modified") ?? "";
+    const staleSince = new Date(
+      new Date(lastModified).getTime() - 86_400_000,
+    ).toUTCString();
+    for (const [label, headers] of [
+      ["If-Match mismatch", { "If-Match": '"deadbeef"' }],
+      ["If-Unmodified-Since stale", { "If-Unmodified-Since": staleSince }],
+    ] as const) {
+      const response = await fetch(`${server.origin}/${astroAsset}`, { headers });
+      await response.arrayBuffer();
+      expect(response.status, label).toBe(412);
+      expect(response.headers.get("cache-control"), label).not.toContain("immutable");
+      expect(response.headers.get("cache-control"), label).toContain(
+        "no-cache, must-revalidate",
+      );
+      expect(response.headers.get("content-security-policy"), label).toBeTruthy();
+    }
+
+    // 405（方法不支持）：OPTIONS 请求同样不得携带 immutable。
+    const optionsResponse = await fetch(`${server.origin}/${astroAsset}`, {
+      method: "OPTIONS",
+    });
+    await optionsResponse.arrayBuffer();
+    expect(optionsResponse.status).toBe(405);
+    expect(optionsResponse.headers.get("cache-control")).not.toContain("immutable");
+    expect(optionsResponse.headers.get("cache-control")).toContain(
+      "no-cache, must-revalidate",
+    );
+    expect(optionsResponse.headers.get("content-security-policy")).toBeTruthy();
+  });
+
+  it("keeps immutable on successful and conditional hashed responses", async () => {
+    // 正向回归：200 与 304 条件响应保持既定 immutable 策略（412 触发的
+    // If-Match 携带匹配 ETag 时也应得到 200/304 而非错误分支）。
+    const head = await fetch(`${server.origin}/${astroAsset}`);
+    const etag = head.headers.get("etag") ?? "";
+    const conditional = await fetch(`${server.origin}/${astroAsset}`, {
+      headers: { "If-None-Match": etag },
+    });
+    expect(conditional.status).toBe(304);
+    expect(conditional.headers.get("cache-control")).toBe(
+      "public, max-age=31536000, immutable",
+    );
+    const matching = await fetch(`${server.origin}/${astroAsset}`, {
+      headers: { "If-Match": etag },
+    });
+    await matching.arrayBuffer();
+    expect(matching.status).toBe(200);
+    expect(matching.headers.get("cache-control")).toContain("immutable");
   });
 
   it("keeps security headers on 404 responses", async () => {
@@ -407,32 +473,62 @@ describe("pinned nginx runtime process lifecycle", () => {
     { timeout: 60_000 },
     async () => {
       const instance = await startInstance();
-      // 记录启动时已捕获的本实例 worker（master 存活时按 PPID 识别）。
-      const { stdout: before } = await execFileAsync("ps", ["-eo", "pid,ppid,command"]);
-      const workersAtStart = before
-        .split("\n")
-        .map((line) => line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/))
-        .filter(
-          (match): match is RegExpMatchArray =>
-            match !== null &&
-            Number(match[2]) === instance.masterPid &&
-            (match[3] ?? "").includes("nginx: worker process"),
-        )
-        .map((match) => Number(match[1]));
+      // 记录启动时的本实例 worker（按进程组直接枚举）。
+      const workersAtStart = (await instanceProcessPids(instance)).filter(
+        (pid) => pid !== instance.masterPid,
+      );
       expect(workersAtStart.length).toBeGreaterThan(0);
 
       // 模拟 master 在 stop() 之前崩溃（外部 SIGKILL，不经 stop() 路径）。
       process.kill(instance.masterPid, "SIGKILL");
       try {
         await instance.stop();
-        // stop() 成功即代表本实例 worker 与监听资源全部释放。
-        const pids = await listDevhotNginxPids();
-        expect(pids, "orphan workers must be gone after stop()").not.toContain(
-          instance.masterPid,
+        // stop() 成功即代表本实例全部 worker 与监听资源释放：按进程组
+        // 直接验证真实存活状态（而非依赖命令行匹配的 PID 清单）。
+        const survivors = await instanceProcessPids(instance);
+        expect(survivors, "instance processes must be gone after stop()").toEqual([]);
+        await assertInstanceGone(instance);
+      } finally {
+        await instance.retryCleanupAfterFailure();
+      }
+    },
+  );
+
+  it(
+    "cleans up rebuilt orphan workers when the master crashes after a worker restart",
+    { timeout: 90_000 },
+    async () => {
+      const instance = await startInstance();
+      // 事件序列：终止初始 worker → master 重建替代 worker → 终止 master
+      // （此时替代 worker 成为孤儿）→ stop() 必须终止替代 worker 并回收
+      // 端口与目录，不得把重建的孤儿当作无关进程放行。
+      const initialWorkers = (await instanceProcessPids(instance)).filter(
+        (pid) => pid !== instance.masterPid,
+      );
+      expect(initialWorkers.length).toBeGreaterThan(0);
+      process.kill(initialWorkers[0]!, "SIGKILL");
+      // 等待 master 重建替代 worker（新 PID，不在旧集合中）。
+      let replacementWorkers: number[] = [];
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+        replacementWorkers = (await instanceProcessPids(instance)).filter(
+          (pid) => pid !== instance.masterPid && !initialWorkers.includes(pid),
         );
-        for (const workerPid of workersAtStart) {
-          expect(pids).not.toContain(workerPid);
-        }
+        if (replacementWorkers.length > 0) break;
+      }
+      expect(
+        replacementWorkers,
+        "master must rebuild a replacement worker after the initial worker dies",
+      ).not.toEqual([]);
+
+      process.kill(instance.masterPid, "SIGKILL");
+      try {
+        await instance.stop();
+        const survivors = await instanceProcessPids(instance);
+        expect(
+          survivors,
+          `rebuilt orphan workers must be gone after stop() (pgid ${instance.instancePgid})`,
+        ).toEqual([]);
         await assertInstanceGone(instance);
       } finally {
         await instance.retryCleanupAfterFailure();
@@ -703,9 +799,9 @@ describe("pinned nginx runtime process lifecycle", () => {
 
 // 进程树断言（目录可能仍存在，用于 removeConfigDir 失败场景）。
 const assertProcessTreeGone = async (instance: NginxServer): Promise<void> => {
-  const pids = await listDevhotNginxPids();
+  const survivors = await instanceProcessPids(instance);
   expect(
-    pids.includes(instance.masterPid),
-    `master pid ${instance.masterPid} still alive after stop`,
-  ).toBe(false);
+    survivors,
+    `processes of instance pgid ${instance.instancePgid} still alive: ${survivors.join(",")}`,
+  ).toEqual([]);
 };
