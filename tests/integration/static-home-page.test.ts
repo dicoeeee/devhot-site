@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { readFile, rm } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
@@ -14,10 +14,12 @@ const astroCli = join(projectRoot, "node_modules", "astro", "bin", "astro.mjs");
 
 describe("static editorial domain home", () => {
   it("builds the repository publication input without assuming its content", async () => {
-    await rm(join(projectRoot, "dist"), { recursive: true, force: true });
-    await execFileAsync(process.execPath, [astroCli, "build"], { cwd: projectRoot });
+    // 在隔离的临时构建目录中构建仓库 site-input，不再删除/改写项目 dist/
+    // （项目 dist 是 final-candidate 验收的对象，测试之间不得互相破坏）。
+    const buildRoot = await prepareStaticBuild(join(projectRoot, "site-input"));
+    await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
 
-    const root = await readFile(join(projectRoot, "dist", "index.html"), "utf8");
+    const root = await readFile(join(buildRoot, "dist", "index.html"), "utf8");
 
     expect(root).toMatch(/<meta http-equiv="refresh" content="0;url=\/[^\"]+\/">/);
   });

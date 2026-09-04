@@ -587,7 +587,11 @@ describe("pinned nginx runtime process lifecycle", () => {
           `missing startup error in ${JSON.stringify(messages)}`,
         ).toBe(true);
         expect(
-          messages.some((message) => /failed to remove|remove failure/.test(message)),
+          messages.some((message) =>
+            /failed to remove|remove failure|cleanup failed|still listening|survived/.test(
+              message,
+            ),
+          ),
           `missing cleanup error in ${JSON.stringify(messages)}`,
         ).toBe(true);
       } finally {

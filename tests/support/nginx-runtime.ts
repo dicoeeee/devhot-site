@@ -328,10 +328,14 @@ export const serveWithNginx = async (
         for (const workerPid of aliveWorkers) {
           signal("SIGKILL", workerPid);
         }
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
-        aliveWorkers = [];
-        for (const workerPid of trackedWorkers) {
-          if (await pidAlive(workerPid)) aliveWorkers.push(workerPid);
+        // SIGKILL 后的退出存在调度延迟（CI 容器更明显）：有界轮询等待。
+        for (let attempt = 0; attempt < 50; attempt += 1) {
+          await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+          aliveWorkers = [];
+          for (const workerPid of trackedWorkers) {
+            if (await pidAlive(workerPid)) aliveWorkers.push(workerPid);
+          }
+          if (aliveWorkers.length === 0) break;
         }
         if (aliveWorkers.length > 0) {
           failures.push(
@@ -380,23 +384,29 @@ export const serveWithNginx = async (
       portListening = (error as Error).name === "TimeoutError";
     }
     if (portListening) {
-      try {
-        const { stdout: lsofOut } = await execFileAsync("lsof", [
-          "-nP",
-          `-iTCP:${listenPort}`,
-          "-sTCP:LISTEN",
-          "-t",
-        ]);
-        const listenerPids = lsofOut
-          .split("\n")
-          .map((line) => Number.parseInt(line.trim(), 10))
-          .filter((pid) => Number.isInteger(pid) && pid > 0);
-        portOwnedByInstance =
-          listenerPids.length > 0 &&
-          listenerPids.some((pid) => pid === child?.pid || workersAlive.includes(pid));
-      } catch {
-        // lsof 不可用：保守视为仍被持有，交由上层错误报告。
-        portOwnedByInstance = true;
+      if (!masterAlive && workersAlive.length === 0) {
+        // 本实例进程树已全部退出：端口必然由无关服务持有（例如测试占位
+        // 服务），不属于本实例，不得据此拒绝回收自身目录。
+        portOwnedByInstance = false;
+      } else {
+        try {
+          const { stdout: lsofOut } = await execFileAsync("lsof", [
+            "-nP",
+            `-iTCP:${listenPort}`,
+            "-sTCP:LISTEN",
+            "-t",
+          ]);
+          const listenerPids = lsofOut
+            .split("\n")
+            .map((line) => Number.parseInt(line.trim(), 10))
+            .filter((pid) => Number.isInteger(pid) && pid > 0);
+          portOwnedByInstance =
+            listenerPids.length > 0 &&
+            listenerPids.some((pid) => pid === child?.pid || workersAlive.includes(pid));
+        } catch {
+          // lsof 不可用且进程树未确认退出：保守视为仍被持有。
+          portOwnedByInstance = true;
+        }
       }
     }
     return {
