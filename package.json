@@ -18,7 +18,7 @@
     "verify:dist": "tsx tools/verify-dist.ts",
     "verify:serving": "tsx tools/verify-serving.ts",
     "build": "npm run validate:input && npm run build:site && npm run copy:assets && npm run verify:dist",
-    "gate": "npm run validate:input && npm run check && npm run test && npm run build:site && npm run copy:assets && npm run verify:dist && npm run verify:serving"
+    "gate": "npm run validate:input && npm run build:site && npm run copy:assets && npm run check && npm run test && npm run verify:dist && npm run verify:serving"
   },
   "dependencies": {
     "ajv": "8.20.0",

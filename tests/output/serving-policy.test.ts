@@ -1,8 +1,8 @@
-import { cp, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { verifyServing } from "../../tools/verify-serving";
 
@@ -10,11 +10,15 @@ const projectRoot = process.cwd();
 const servingConfigPath = join(projectRoot, "deploy", "nginx-serving.conf");
 const securityHeadersPath = join(projectRoot, "deploy", "security-headers.conf");
 
+// 记录本测试文件创建的全部临时目录；teardown 统一回收，清理失败不得静默。
+const createdTempRoots: string[] = [];
+
 const tampered = async (
   mutate: (config: string) => string,
   mutateHeaders?: (headers: string) => string,
 ): Promise<string> => {
   const root = await mkdtemp(join(tmpdir(), "devhot-serving-"));
+  createdTempRoots.push(root);
   const configDir = join(root, "deploy");
   await cp(dirname(securityHeadersPath), configDir, { recursive: true });
   const path = join(configDir, "nginx-serving.conf");
@@ -26,6 +30,23 @@ const tampered = async (
   }
   return path;
 };
+
+// 无论测试成功、断言失败或构建失败，都回收本次创建的精确目录（不按全局
+// 前缀删除历史目录）；清理失败原样抛出。
+afterEach(async () => {
+  const failures: Error[] = [];
+  while (createdTempRoots.length > 0) {
+    const root = createdTempRoots.pop()!;
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "serving-policy temp cleanup failed");
+  }
+});
 
 describe("serving security and cache policy", () => {
   it("accepts the committed serving baseline", async () => {

@@ -1,4 +1,5 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { execFile, spawn, type ChildProcess } from "node:child_process";
+import { promisify } from "node:util";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -22,6 +23,11 @@ export const NGINX_VERSION = "1.30.4";
 export const NGINX_TARBALL_SHA256 =
   "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b";
 const NGINX_URL = `https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz`;
+
+const execFileAsync = promisify(execFile) as (
+  command: string,
+  args: string[],
+) => Promise<{ stdout: string }>;
 
 const runtimeRoot = join(
   tmpdir(),
@@ -147,12 +153,6 @@ const STOP_TIMEOUT_MS = 10_000;
 
 /** 枚举本仓库固定运行时启动的全部 nginx 进程 PID（master 与 worker）。 */
 export const listDevhotNginxPids = async (): Promise<readonly number[]> => {
-  const { execFile } = await import("node:child_process");
-  const { promisify } = await import("node:util");
-  const execFileAsync = promisify(execFile) as (
-    command: string,
-    args: string[],
-  ) => Promise<{ stdout: string }>;
   const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
   const pids: number[] = [];
   for (const line of stdout.split("\n")) {
@@ -208,28 +208,77 @@ export const serveWithNginx = async (
     };
   })();
 
-  // 完整进程清理：SIGTERM 精确 master → 有界等待 → SIGKILL 终局 → 由调用方
-  // 确认进程树退出与端口关闭。kill() 发送失败进入错误证据。
+  // 精确进程存活检查：child.killed 只表示“已发送过信号”，不表示进程已退出，
+  // 绝不能作为存活依据；以 ps 为准。同时确认 PID 仍属于本实例（命令行含
+  // 本实例配置路径），避免误杀 PID 复用的无关进程。
+  const masterAlive = async (): Promise<boolean> => {
+    if (!child || child.pid === undefined) return false;
+    try {
+      const { stdout } = await execFileAsync("ps", [
+        "-p",
+        String(child.pid),
+        "-o",
+        "command=",
+      ]);
+      return stdout.includes(configDir);
+    } catch {
+      return false;
+    }
+  };
+
+  // 本实例 worker 枚举：master 存活时按 PPID=master 识别；master 已死后按
+  // 预先捕获的 PID 追踪（worker cmdline 不含 configDir，无法事后识别）。
+  const workerPidsUnderMaster = async (): Promise<readonly number[]> => {
+    if (!child?.pid) return [];
+    const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,command"]);
+    const workers: number[] = [];
+    for (const line of stdout.split("\n")) {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(.*)$/);
+      if (!match) continue;
+      const pid = Number(match[1]);
+      const ppid = Number(match[2]);
+      const command = match[3] ?? "";
+      if (command.includes("nginx: worker process") && ppid === child.pid) {
+        workers.push(pid);
+      }
+    }
+    return workers;
+  };
+
+  const pidAlive = async (pid: number): Promise<boolean> => {
+    try {
+      await execFileAsync("ps", ["-p", String(pid)]);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
   const stopProcessTree = async (failures: string[]): Promise<void> => {
     if (!child || child.pid === undefined) return;
     const masterPid = child.pid;
     const exited = waitForExit(child);
 
-    // 对已退出的 child 发送信号是 no-op（kill 返回 false 属预期）；只有
-    // child 仍存活时发送失败才进入错误证据。
-    const signal = (sig: NodeJS.Signals): boolean => {
-      if (child!.exitCode !== null || child!.killed) return true;
+    const signal = (sig: NodeJS.Signals, target?: number): void => {
       try {
-        const delivered = child!.kill(sig);
-        if (!delivered && child!.exitCode === null) return false;
-        return true;
+        if (target !== undefined) {
+          process.kill(target, sig);
+        } else {
+          child!.kill(sig);
+        }
       } catch (error) {
-        failures.push(`failed to send ${sig} to master pid ${masterPid}: ${error}`);
-        return false;
+        failures.push(
+          `failed to send ${sig} to ${target ?? `master pid ${masterPid}`}: ${error}`,
+        );
       }
     };
 
-    signal("SIGTERM");
+    // master 存活时先捕获 worker PID（master 被杀后无法再识别孤儿 worker）。
+    const trackedWorkers = await workerPidsUnderMaster();
+
+    if (await masterAlive()) {
+      signal("SIGTERM");
+    }
     const termResult = await Promise.race([
       exited.then(() => "exited" as const),
       new Promise<"timeout">((resolvePromise) =>
@@ -237,19 +286,58 @@ export const serveWithNginx = async (
       ),
     ]);
     if (termResult === "timeout") {
-      if (!signal("SIGKILL")) {
-        failures.push(`failed to deliver SIGKILL to live master pid ${masterPid}`);
+      // SIGTERM 超时且 master 仍存活：必须真正发送 SIGKILL（child.killed 已
+      // 为 true 但进程未退出，不能用其短路）。
+      if (await masterAlive()) {
+        signal("SIGKILL");
+        const killResult = await Promise.race([
+          exited.then(() => "exited" as const),
+          new Promise<"timeout">((resolvePromise) =>
+            setTimeout(() => resolvePromise("timeout"), STOP_TIMEOUT_MS).unref(),
+          ),
+        ]);
+        if (killResult === "timeout" && (await masterAlive())) {
+          failures.push(
+            `master pid ${masterPid} survived SIGTERM and SIGKILL (${identity()})`,
+          );
+        }
+      } else {
+        // 等待期间已退出：退出事件可能在 exitCode 更新前到达，等待 exited 兜底。
+        await exited;
       }
-      const killResult = await Promise.race([
-        exited.then(() => "exited" as const),
-        new Promise<"timeout">((resolvePromise) =>
-          setTimeout(() => resolvePromise("timeout"), STOP_TIMEOUT_MS).unref(),
-        ),
-      ]);
-      if (killResult === "timeout") {
-        failures.push(
-          `master pid ${masterPid} survived SIGTERM and SIGKILL (${identity()})`,
-        );
+    }
+    // master 被 SIGKILL 后 worker 可能被 PID 1 接管并继续监听：给正常退出
+    // 一点时间，然后只对预先捕获的本实例 worker 精确 SIGTERM/SIGKILL。
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
+    let aliveWorkers: number[] = [];
+    for (const workerPid of trackedWorkers) {
+      if (await pidAlive(workerPid)) aliveWorkers.push(workerPid);
+    }
+    if (aliveWorkers.length > 0) {
+      for (const workerPid of aliveWorkers) {
+        signal("SIGTERM", workerPid);
+      }
+      for (let attempt = 0; attempt < 50 && aliveWorkers.length > 0; attempt += 1) {
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
+        aliveWorkers = [];
+        for (const workerPid of trackedWorkers) {
+          if (await pidAlive(workerPid)) aliveWorkers.push(workerPid);
+        }
+      }
+      if (aliveWorkers.length > 0) {
+        for (const workerPid of aliveWorkers) {
+          signal("SIGKILL", workerPid);
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+        aliveWorkers = [];
+        for (const workerPid of trackedWorkers) {
+          if (await pidAlive(workerPid)) aliveWorkers.push(workerPid);
+        }
+        if (aliveWorkers.length > 0) {
+          failures.push(
+            `workers ${aliveWorkers.join(",")} survived SIGTERM and SIGKILL (${identity()})`,
+          );
+        }
       }
     }
   };
@@ -261,12 +349,6 @@ export const serveWithNginx = async (
   }> => {
     const allPids = await listDevhotNginxPids();
     const masterAlive = child?.pid !== undefined && allPids.includes(child.pid);
-    const { execFile } = await import("node:child_process");
-    const { promisify } = await import("node:util");
-    const execFileAsync = promisify(execFile) as (
-      command: string,
-      args: string[],
-    ) => Promise<{ stdout: string }>;
     const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,command"]);
     const workersAlive: number[] = [];
     for (const line of stdout.split("\n")) {
@@ -282,7 +364,11 @@ export const serveWithNginx = async (
         workersAlive.push(pid);
       }
     }
+    // 端口归属检查：本实例进程树退出后，端口可能被无关服务占用（例如测试
+    // 的占位服务）。只把“端口仍被本实例进程持有”视为未退出；无关监听者
+    // 不影响本实例资源回收，也不得被停止或等待。
     let portListening = false;
+    let portOwnedByInstance = false;
     try {
       const probe = await fetch(`http://127.0.0.1:${listenPort}/`, {
         redirect: "manual",
@@ -293,7 +379,31 @@ export const serveWithNginx = async (
     } catch (error) {
       portListening = (error as Error).name === "TimeoutError";
     }
-    return { masterAlive, workersAlive, portListening };
+    if (portListening) {
+      try {
+        const { stdout: lsofOut } = await execFileAsync("lsof", [
+          "-nP",
+          `-iTCP:${listenPort}`,
+          "-sTCP:LISTEN",
+          "-t",
+        ]);
+        const listenerPids = lsofOut
+          .split("\n")
+          .map((line) => Number.parseInt(line.trim(), 10))
+          .filter((pid) => Number.isInteger(pid) && pid > 0);
+        portOwnedByInstance =
+          listenerPids.length > 0 &&
+          listenerPids.some((pid) => pid === child?.pid || workersAlive.includes(pid));
+      } catch {
+        // lsof 不可用：保守视为仍被持有，交由上层错误报告。
+        portOwnedByInstance = true;
+      }
+    }
+    return {
+      masterAlive,
+      workersAlive,
+      portListening: portOwnedByInstance,
+    };
   };
 
   let cleanupPromise: Promise<void> | undefined;
@@ -402,10 +512,13 @@ export const serveWithNginx = async (
     await writeFile(configPath, rendered);
 
     await exec(nginxBinaryPath, ["-t", "-c", configPath], configDir);
+    // detached: 独立进程组。测试可用 SIGSTOP 暂停 master 验证 SIGKILL 升级，
+    // 且不会把停止状态传播到测试运行器的终端进程组；生命周期仍由本文件
+    // 显式管理（stop/SIGKILL 均按精确 PID 发送）。
     child = spawn(nginxBinaryPath, ["-c", configPath, "-g", "daemon off;"], {
       cwd: configDir,
       stdio: "ignore",
-      detached: false,
+      detached: true,
     });
     // spawn error（如 binary 不存在）必须让等待 Promise 结束。
     void waitForExit(child);
@@ -427,8 +540,12 @@ export const serveWithNginx = async (
           signal: AbortSignal.timeout(250),
         });
         await probe.arrayBuffer();
-        ready = true;
-        break;
+        // readiness 必须来自本实例：/release.json 是 JSON；端口被无关 HTTP
+        // 服务占用时（text/plain 等），不得误判为就绪。
+        if ((probe.headers.get("content-type") ?? "").includes("application/json")) {
+          ready = true;
+          break;
+        }
       } catch (error) {
         // fetch 失败可能是端口未开（重试）或占位服务挂断（nginx 已死，重试
         // 会命中上方的 exitCode 检查）。

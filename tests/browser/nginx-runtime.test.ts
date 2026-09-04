@@ -221,6 +221,17 @@ describe("pinned nginx runtime security and cache policy", () => {
     }
   });
 
+  it("serves missing hashed assets as 404 with revalidation, never immutable", async () => {
+    // 两个哈希资源路径下的 404 都必须重验证并保留全部安全头，
+    // 绝不能继承 immutable 一年缓存。
+    for (const path of ["/media/sha256/missing.png", "/_astro/missing.abc123.css"]) {
+      const result = await probe(`${server.origin}${path}`);
+      expect(result.status, path).toBe(404);
+      expectSecurityHeaders(result);
+      expect(result.headers["cache-control"], path).toBe("no-cache, must-revalidate");
+    }
+  });
+
   it("keeps security headers on 404 responses", async () => {
     const result = await probe(`${server.origin}/no-such-page/`);
     expect(result.status).toBe(404);
@@ -338,6 +349,30 @@ describe("pinned nginx runtime process lifecycle", () => {
   );
 
   it(
+    "escalates to SIGKILL when the master ignores SIGTERM",
+    { timeout: 60_000 },
+    async () => {
+      const instance = await startInstance();
+      // SIGSTOP 暂停 master：SIGTERM 无法被处理（等价于忽略 SIGTERM），
+      // stop() 必须在超时后真实发送 SIGKILL 终止被暂停的进程并完成清理。
+      process.kill(instance.masterPid, "SIGSTOP");
+      try {
+        await instance.stop();
+        await assertInstanceGone(instance);
+      } finally {
+        // 兜底：若 stop() 因缺陷失败，恢复调度后确保清理（SIGCONT 后
+        // 排队的 SIGTERM 会生效）。
+        try {
+          process.kill(instance.masterPid, "SIGCONT");
+        } catch {
+          // 已退出则无需恢复。
+        }
+        await instance.retryCleanupAfterFailure();
+      }
+    },
+  );
+
+  it(
     "resolves repeated stop() calls with the same shared cleanup result",
     { timeout: 30_000 },
     async () => {
@@ -441,14 +476,79 @@ describe("pinned nginx runtime process lifecycle", () => {
   });
 
   it(
+    "reclaims its configDir when a foreign service holds the port",
+    { timeout: 30_000 },
+    async () => {
+      const { createServer } = await import("node:http");
+      const blocker = createServer((request, response) => {
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("foreign placeholder");
+      });
+      await new Promise<void>((resolvePromise) =>
+        blocker.listen(0, "127.0.0.1", () => resolvePromise()),
+      );
+      const blockedPort = (blocker.address() as { port: number }).port;
+      const nginxBinary = await ensureNginxRuntime();
+      const dirsBefore = await listConfDirs();
+      let configDirLeft: string | undefined;
+      try {
+        // 本实例 nginx 绑定失败退出：启动错误保留，目录必须被回收。
+        const thrown = await serveWithNginx(
+          nginxBinary,
+          build.distRoot,
+          join(projectRoot, "deploy", "nginx-serving.conf"),
+          join(projectRoot, "deploy", "security-headers.conf"),
+          blockedPort,
+        ).then(
+          (instance) => instance,
+          (error: unknown) => {
+            const message = (error as Error).message;
+            if (!/did not become reachable|exited before readiness/.test(message)) {
+              throw error;
+            }
+            return undefined;
+          },
+        );
+        if (thrown !== undefined) {
+          await thrown.stop();
+          throw new Error("expected startup failure but instance started");
+        }
+        // 目录已删除：本次运行不新增 devhot-nginx-conf-*。
+        const dirsAfter = await listConfDirs();
+        const added = dirsAfter.filter((dir) => !dirsBefore.includes(dir));
+        if (added.length > 0) {
+          configDirLeft = added[0];
+          throw new Error(
+            `configDir leaked while foreign service holds port: ${added.join(",")}`,
+          );
+        }
+        // 占位服务不受影响：仍正常响应。
+        const probe = await fetch(`http://127.0.0.1:${blockedPort}/`);
+        expect(probe.status).toBe(200);
+      } finally {
+        await new Promise<void>((resolvePromise) =>
+          blocker.close(() => resolvePromise()),
+        );
+        const { rm } = await import("node:fs/promises");
+        if (configDirLeft) {
+          await rm(join(tmpdir(), configDirLeft), { recursive: true, force: true });
+        }
+      }
+    },
+  );
+
+  it(
     "preserves both startup and cleanup errors when both fail",
     { timeout: 30_000 },
     async () => {
       // 启动失败（端口被占）+ cleanup 失败（removeConfigDir 注入）：
       // 两类错误都必须保留在 AggregateError 中。
-      const { createServer } = await import("node:net");
-      const blocker = createServer((socket) => {
-        socket.destroy();
+      const { createServer } = await import("node:http");
+      // 正常响应 HTTP 的占位服务（不是立即断开的 socket）：端口被无关服务
+      // 持有时，本实例 nginx 启动失败，但清理不得把无关监听者当作自身残留。
+      const blocker = createServer((request, response) => {
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("foreign placeholder");
       });
       await new Promise<void>((resolvePromise) =>
         blocker.listen(0, "127.0.0.1", () => resolvePromise()),

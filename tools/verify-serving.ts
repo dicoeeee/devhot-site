@@ -108,7 +108,8 @@ export const verifyServing = async ({
       "serving config must include the security headers snippet at server level before any location",
     );
   }
-  const cacheLocations = [...config.matchAll(/^\s*location[^\{]*\{/gm)].map((m) =>
+  // 命名 location（@name）不属于缓存 location 集合，单独校验。
+  const cacheLocations = [...config.matchAll(/^\s*location[^\{@]*\{/gm)].map((m) =>
     m[0].trim(),
   );
   const knownLocations = [...revalidatePaths, ...immutablePaths];
@@ -144,7 +145,39 @@ export const verifyServing = async ({
       ) {
         throw new Error(`content-addressed path must be cached immutably: ${location}`);
       }
+      // 哈希资源路径必须显式 try_files ... =404，缺失文件进入 404 处理，
+      // 不得把 immutable 缓存套在 404 响应上。
+      if (!/try_files\s+\$uri\s+=404;/.test(block)) {
+        throw new Error(
+          `content-addressed path must fail closed to 404 for missing assets: ${location}`,
+        );
+      }
     }
+  }
+
+  // 哈希资源 404 必须重验证并保留全部安全头：error_page 指向命名 location，
+  // 该 location 重复 include 安全头片段并声明 no-cache。
+  const hashedMissingBlock = extractBlock(config, "location @hashed_missing {");
+  if (!hashedMissingBlock) {
+    throw new Error(
+      "serving config must route hashed-asset 404s to @hashed_missing for revalidation",
+    );
+  }
+  if (!/error_page\s+404\s+@hashed_missing;/.test(config)) {
+    throw new Error("serving config must declare error_page 404 @hashed_missing");
+  }
+  if (!hashedMissingBlock.includes(snippetInclude)) {
+    throw new Error("@hashed_missing must re-include the security headers snippet");
+  }
+  if (
+    !hashedMissingBlock.includes(
+      'add_header Cache-Control "no-cache, must-revalidate" always;',
+    )
+  ) {
+    throw new Error("@hashed_missing must serve 404s with revalidation");
+  }
+  if (/max-age=\d{4,}/.test(hashedMissingBlock)) {
+    throw new Error("@hashed_missing must not gain a long freshness window");
   }
 };
 

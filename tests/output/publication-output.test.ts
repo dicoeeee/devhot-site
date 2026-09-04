@@ -1,13 +1,62 @@
 import { execFile } from "node:child_process";
-import { appendFile, cp, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  cp,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { promisify } from "node:util";
-import { beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import { copyDeclaredAssets } from "../../tools/copy-assets";
+import { listSafeFiles } from "../../src/infrastructure/list-safe-files";
 import { verifyDistribution } from "../../tools/verify-dist";
+
+// 记录本测试文件创建的全部 tamperedDist 目录；teardown 统一回收，
+// 清理失败不得静默（不按全局前缀删除历史目录）。
+const createdTempDists: string[] = [];
+const newTamperedDist = async (): Promise<string> => {
+  const dist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+  createdTempDists.push(dist);
+  return dist;
+};
+// fixture root（devhot-site-input-*）与 build root（devhot-site-page-*）
+// 同样纳入回收：这两类目录在本测试文件中创建后没有各自的清理路径。
+const createdTempRoots: string[] = [];
+const trackedBuildRoot = async (prepare: () => Promise<string>): Promise<string> => {
+  const root = await prepare();
+  createdTempRoots.push(root);
+  return root;
+};
+
+afterEach(async () => {
+  const failures: Error[] = [];
+  while (createdTempRoots.length > 0) {
+    const root = createdTempRoots.pop()!;
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  }
+  while (createdTempDists.length > 0) {
+    const dist = createdTempDists.pop()!;
+    try {
+      await rm(dist, { recursive: true, force: true });
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "publication-output temp cleanup failed");
+  }
+});
 import { validatePublicationInput } from "../../src/content/adapters/publication-input/validate-publication-input";
 import { writePublicationFixture } from "../support/publication-fixture";
 import { prepareStaticBuild } from "../support/static-build";
@@ -108,7 +157,8 @@ describe("publication output", () => {
       emptyTopic: true,
       topicJudgment: "none",
     });
-    const buildRoot = await prepareStaticBuild(fixture.root);
+    createdTempRoots.push(fixture.root);
+    const buildRoot = await trackedBuildRoot(() => prepareStaticBuild(fixture.root));
     const emptyTopicDist = join(buildRoot, "dist");
     await execFileAsync(
       process.execPath,
@@ -133,7 +183,8 @@ describe("publication output", () => {
       evidenceReadingContract: true,
       mermaidMechanismContract: true,
     });
-    const buildRoot = await prepareStaticBuild(fixture.root);
+    createdTempRoots.push(fixture.root);
+    const buildRoot = await trackedBuildRoot(() => prepareStaticBuild(fixture.root));
     const svgDist = join(buildRoot, "dist");
     await execFileAsync(
       process.execPath,
@@ -156,7 +207,7 @@ describe("publication output", () => {
   it.each(["https://example.com/runtime.js", "//cdn.example/runtime.js"])(
     "rejects a page that introduces the third-party runtime asset %s",
     async (runtimeUrl) => {
-      const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+      const tamperedDist = await newTamperedDist();
       await cp(distRoot, tamperedDist, { recursive: true });
       await appendFile(
         join(tamperedDist, ...defaultDomainOutputSegments, "index.html"),
@@ -230,7 +281,7 @@ describe("publication output", () => {
       "inline executable script",
     ],
   ])("rejects distribution HTML that contains %s", async (payload, expectedError) => {
-    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    const tamperedDist = await newTamperedDist();
     await cp(distRoot, tamperedDist, { recursive: true });
     await appendFile(
       join(tamperedDist, ...defaultDomainOutputSegments, "index.html"),
@@ -243,7 +294,7 @@ describe("publication output", () => {
   });
 
   it("rejects a distributed script that registers a service worker", async () => {
-    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    const tamperedDist = await newTamperedDist();
     await cp(distRoot, tamperedDist, { recursive: true });
     await appendFile(
       join(tamperedDist, "scripts", "timeline.js"),
@@ -285,10 +336,15 @@ describe("publication output", () => {
     "\nfetch(`\\u0000https://example.com/api`);\n",
     "\nfetch(`ht\\ttps://example.com/api`);\n",
     '\nfetch("HT\\nTps://example.com/api");\n',
+    '\nfetch("https:example.invalid/collect");\n',
+    '\nfetch("https:/example.invalid/collect");\n',
+    '\nfetch("/\\\\example.invalid/collect");\n',
+    "\nfetch(`https:example.invalid/collect`);\n",
+    '\nconst img = document.createElement("img"); img.src = "https:example.invalid/x.png";\n',
   ])(
     "rejects a distributed script that opens a third-party connection via %s",
     async (payload) => {
-      const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+      const tamperedDist = await newTamperedDist();
       await cp(distRoot, tamperedDist, { recursive: true });
       await appendFile(join(tamperedDist, "scripts", "timeline.js"), payload);
 
@@ -313,7 +369,7 @@ describe("publication output", () => {
     '\nconst shared = new globalThis["SharedWorker"]("/shared.js");\n',
     "\nconst url = '/worker.js'; const worker = new Worker(url);\n",
   ])("rejects a distributed script that constructs a Worker via %s", async (payload) => {
-    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    const tamperedDist = await newTamperedDist();
     await cp(distRoot, tamperedDist, { recursive: true });
     await appendFile(join(tamperedDist, "scripts", "timeline.js"), payload);
 
@@ -322,8 +378,71 @@ describe("publication output", () => {
     );
   });
 
+  it("rejects a seven-page candidate that lacks timeline or tag detail routes", async () => {
+    // 构造“缺时间线与标签详情”的候选：从最终候选 dist 移除 /tags/* 与
+    // /timeline/* 路由和文件，并同步改写 _publication.json。旧契约兼容
+    // （默认验证）仍通过；七页面候选验收必须拒绝——不能只靠“元数据与
+    // 文件集合彼此一致”放行。
+    const prepare = async (removeRoutes: (route: string) => boolean): Promise<string> => {
+      const tampered = await newTamperedDist();
+      await cp(distRoot, tampered, { recursive: true });
+      const metadataPath = join(tampered, "_publication.json");
+      const metadata = JSON.parse(await readFile(metadataPath, "utf8"));
+      const kept = metadata.routes.filter((route: string) => !removeRoutes(route));
+      if (kept.length === metadata.routes.length) {
+        throw new Error("test setup failed: no routes removed");
+      }
+      metadata.routes = kept;
+      await writeFile(metadataPath, `${JSON.stringify(metadata, null, 2)}\n`);
+      const htmlRoutes = await listSafeFiles(tampered, "distribution");
+      for (const file of htmlRoutes) {
+        if (
+          file.endsWith(".html") &&
+          removeRoutes(
+            `/${file
+              .replace(/\/index\.html$/, "")
+              .split(sep)
+              .join("/")}/`,
+          )
+        ) {
+          await rm(join(tampered, file), { force: true });
+        }
+      }
+      return tampered;
+    };
+
+    const withoutTimeline = await prepare(
+      (route) => route === "/timeline/" || route.startsWith("/timeline/"),
+    );
+    const withoutTags = await prepare((route) => route.startsWith("/tags/"));
+
+    // 缺时间线：领域首页链接到 /timeline/，内部链接完整性检查拒绝；
+    // 七页面候选验收同样以路由完整性拒绝。任一防线都不得放行。
+    await expect(verifyDistribution({ distRoot: withoutTimeline })).rejects.toThrow(
+      /broken internal link/,
+    );
+    await expect(
+      verifyDistribution({ distRoot: withoutTimeline, requireSevenPageRelease: true }),
+    ).rejects.toThrow(/broken internal link|seven-page release candidate requires/);
+    // 缺标签详情：主题总览链接到标签页，同样被拒绝；七页面候选验收以
+    // “缺标签详情路由”显式拒绝。
+    await expect(verifyDistribution({ distRoot: withoutTags })).rejects.toThrow(
+      /broken internal link/,
+    );
+    await expect(
+      verifyDistribution({ distRoot: withoutTags, requireSevenPageRelease: true }),
+    ).rejects.toThrow(/broken internal link|seven-page release candidate requires/);
+  });
+
+  it("verifies the final candidate dist as a complete seven-page release", async () => {
+    // 最终候选 dist（npm run build 产物）必须通过七页面完整性验收。
+    await expect(
+      verifyDistribution({ distRoot: distRoot, requireSevenPageRelease: true }),
+    ).resolves.toEqual(expect.objectContaining({ schemaVersion: 1 }));
+  });
+
   it("still allows same-origin relative URLs in distributed scripts", async () => {
-    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    const tamperedDist = await newTamperedDist();
     await cp(distRoot, tamperedDist, { recursive: true });
     await appendFile(
       join(tamperedDist, "scripts", "timeline.js"),
@@ -337,7 +456,7 @@ describe("publication output", () => {
   });
 
   it("rejects a release.json that drifts from the publication metadata", async () => {
-    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    const tamperedDist = await newTamperedDist();
     await cp(distRoot, tamperedDist, { recursive: true });
     await writeFile(
       join(tamperedDist, "release.json"),
@@ -350,7 +469,7 @@ describe("publication output", () => {
   });
 
   it("rejects maintenance state that publishes reader HTML", async () => {
-    const tamperedDist = await mkdtemp(join(tmpdir(), "devhot-site-dist-"));
+    const tamperedDist = await newTamperedDist();
     await cp(distRoot, tamperedDist, { recursive: true });
     await appendFile(join(tamperedDist, "maintenance", "index.html"), "<html></html>");
 

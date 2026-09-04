@@ -37,6 +37,12 @@ interface MaintenanceReminders {
 
 interface VerifyDistributionOptions {
   readonly distRoot: string;
+  /**
+   * #78 七页面发布候选验收：最终候选 dist 必须包含完整七类页面
+   * （领域首页、洞察、来源、主题总览、主题详情、标签详情、时间线）。
+   * 旧契约兼容测试（无时间线/标签的最小切片）仍可用默认值验证。
+   */
+  readonly requireSevenPageRelease?: boolean;
 }
 
 const sha256 = (value: Uint8Array): string =>
@@ -99,8 +105,7 @@ export const normalizeUrlValue = (value: string): string =>
     .replace(/^[\u0000-\u0020]+/, "")
     .replace(/[\u0000-\u0020]+$/, "");
 
-const isExternalReference = (value: string): boolean =>
-  /^(?:https?:)?\/\//i.test(normalizeUrlValue(value));
+const isExternalReference = (value: string): boolean => isExternalScriptUrl(value);
 
 const walk = (node: Node, visit: (element: Element) => void): void => {
   if ("tagName" in node) {
@@ -236,9 +241,28 @@ export const scanHtmlSecurity = (html: string, path: string): void => {
 // - Worker/SharedWorker 构造（Identifier、window/globalThis/self 成员形式、
 //   可静态确定的 computed property）一律拒绝，不论参数来源；
 // - 并保留 service worker 注册与内联事件处理属性的既有拒绝策略。
+// 按 URL 解析结果判断外部性：`https:example.invalid/x`、`https:/example.invalid/x`、
+// `/\example.invalid/x` 在浏览器 URL 解析下都是外部 https 请求，仅匹配 `://`
+// 或 `//` 前缀会漏报。仅对“看起来像引用”的值（已知 scheme 开头或以 / 开头）
+// 走判定，避免把普通字符串（如时间 `T00:00:00Z`）误判成外部 host；
+// data:/blob: 属 CSP 允许的内联载荷，不算外部。
 const isExternalScriptUrl = (value: string): boolean => {
   const normalized = normalizeUrlValue(value);
-  return /^(?:https?|wss?):\/\//i.test(normalized) || normalized.startsWith("//");
+  if (normalized === "") return false;
+  const looksLikeReference =
+    /^(?:https?|wss?|data|blob):/i.test(normalized) || normalized.startsWith("/");
+  if (!looksLikeReference) return false;
+  // 任何 http(s)/ws(s) scheme 形态（含 https:、https:/ 等变体）都指向外部
+  // 站点（本站运行时只允许同源相对路径）。
+  if (/^(?:https?|wss?):/i.test(normalized)) return true;
+  if (normalized.startsWith("//")) return true;
+  if (/^(?:data|blob):/i.test(normalized)) return false;
+  try {
+    const parsed = new URL(normalized, "http://devhot.invalid/");
+    return parsed.origin !== "http://devhot.invalid";
+  } catch {
+    return false;
+  }
 };
 
 // 模板字符串按前缀判定：任一 quasi（trim 后）以第三方 scheme 开头即拒绝，
@@ -341,19 +365,30 @@ const scanScriptSecurity = (source: string, path: string): void => {
 };
 
 const scanStyleSecurity = (source: string, path: string): void => {
-  // CSS 中的 URL 同样按 WHATWG 规范化后判断：内部 TAB/LF/CR 与首尾
-  // C0/space 都不能掩盖外部 scheme。
+  // CSS 中的 URL 与 @import 同样按解析结果判断外部性（与 JS/HTML 一致）：
+  // 提取 url(...) 与 @import "..." 的候选值后走 isExternalScriptUrl。
   const normalizedSource = normalizeUrlValue(source).replace(/[\t\n\r]/g, "");
-  if (/@import\s+(?:url\()?\s*(["']?)(?:https?:)?\/\//i.test(normalizedSource)) {
-    throw new Error(`external runtime dependency found in ${path}`);
+  const candidates: string[] = [];
+  for (const match of normalizedSource.matchAll(
+    /url\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi,
+  )) {
+    candidates.push(match[1] ?? match[2] ?? match[3] ?? "");
   }
-  if (/url\s*\(\s*(["']?)(?:https?:)?\/\//i.test(normalizedSource)) {
-    throw new Error(`external runtime dependency found in ${path}`);
+  for (const match of normalizedSource.matchAll(
+    /@import\s+(?:url\s*\(\s*)?["']([^"']+)["']/gi,
+  )) {
+    candidates.push(match[1] ?? "");
+  }
+  for (const candidate of candidates) {
+    if (isExternalScriptUrl(candidate)) {
+      throw new Error(`external runtime dependency found in ${path}`);
+    }
   }
 };
 
 export const verifyDistribution = async ({
   distRoot,
+  requireSevenPageRelease = false,
 }: VerifyDistributionOptions): Promise<PublicationMetadata> => {
   const metadata = parseMetadata(
     JSON.parse(await readFile(join(distRoot, "_publication.json"), "utf8")) as unknown,
@@ -370,6 +405,15 @@ export const verifyDistribution = async ({
     !metadata.routes.some((route) => route.endsWith("/topics/"))
   ) {
     throw new Error("the seven reader pages require topic routes");
+  }
+  if (requireSevenPageRelease) {
+    // 最终候选的七类页面完整性：标签详情与时间线缺一不可。
+    if (!metadata.routes.some((route) => route.startsWith("/tags/"))) {
+      throw new Error("the seven-page release candidate requires tag detail routes");
+    }
+    if (!metadata.routes.includes("/timeline/")) {
+      throw new Error("the seven-page release candidate requires the timeline route");
+    }
   }
   if (new Set(metadata.routes).size !== metadata.routes.length) {
     throw new Error("publication metadata contains duplicate routes");
@@ -546,10 +590,12 @@ export const verifyDistribution = async ({
 };
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  // CLI 验证的是最终发布候选 dist：必须通过七页面完整性验收。
   const metadata = await verifyDistribution({
     distRoot: join(process.cwd(), "dist"),
+    requireSevenPageRelease: true,
   });
   console.log(
-    `Verified ${metadata.routes.length} route(s) for ${metadata.publicationId}`,
+    `Verified ${metadata.routes.length} route(s) for ${metadata.publicationId} (seven-page release candidate)`,
   );
 }
