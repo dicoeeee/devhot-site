@@ -1,16 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash } from "node:crypto";
-import {
-  chmod,
-  cp,
-  mkdir,
-  readFile,
-  rename,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -110,31 +101,61 @@ export const ensureNginxRuntime = async (): Promise<string> => {
   // make install 已写入最终位置；staging 仅保留 tarball 与源码目录供追溯。
   const marker2 = join(runtimeRoot, ".binary-check");
   await writeFile(marker2, sha256(previous));
-  await rename(join(staging, "src"), join(runtimeRoot, ".source")).catch(() => {});
   return nginxBinary;
 };
 
+// ---------------------------------------------------------------------------
+// 生命周期与观测模型
+//
+// 实例身份（identity）
+//   - 来源：spawn(..., { detached: true }) 的创建语义。detached 子进程运行
+//     在一个全新进程组中，且是该组的组长，因此 PGID === master PID。这是
+//     操作系统在创建时刻保证的关系，不是事后观察出来的。
+//   - 建立：spawn 返回即确定（pgid := child.pid）；master 退出不会使它失效
+//     ——进程组 ID 在组内所有成员退出前保持有效，nginx master fork 的一切
+//     worker（含 master 崩溃后 init 接管的孤儿、重建的替代 worker）都
+//     继承该组，因此任何时刻“属于本实例的进程”都能按 PGID 枚举。
+//   - 交叉验证：启动后用 ps 复核一次 master 的 pgid 与创建语义一致；
+//     不一致视为异常系统状态，启动失败（I2/I3）。
+//
+// 观测（observation）与语义
+//   - EXITED（可证明退出）：ps 不再列出该 PID，或仅列出僵尸态；按 PGID
+//     枚举不到任何非僵尸成员；端口监听者的 PGID 与本实例组不同。
+//   - UNKNOWN（无法确认）：ps/lsof 查询失败或输出无法解析。UNKNOWN 绝不
+//     折叠为“不存在/无关”，它使清理失败（I3/I7）。
+//   - ps、lsof 只用于观测与交叉验证，不用于产生身份（I2）。
+//
+// 清理核心（所有路径共用）
+//   对整个进程组发送信号：kill(-pgid, TERM) → 有界等待组内成员退出 →
+//   kill(-pgid, KILL) → 有界等待 → 最终确认（组内无存活成员且端口不再由
+//   本组持有）→ 删除 configDir。启动失败、正常 stop、重复 stop、失败恢复
+//   全部经过这一条路径（I4/I5）。成功即代表 I6 成立；无法确认退出时保留
+//   目录与错误（I7），并暴露 recover() 供受控重试。
+//   信号只发往本实例进程组，绝不触及组外的任何进程（I8）。
+// ---------------------------------------------------------------------------
+
+/** 生命周期状态：清理责任从资源创建时刻起始终存在（I1）。 */
+export type NginxLifecycleState = "ready" | "cleaning" | "cleaned" | "cleanup-failed";
+
+/** 进程观测结果：UNKNOWN 不等于 EXITED（I3）。 */
+export type ProcessObservation = "alive" | "exited" | "unknown";
+
 export interface NginxServer {
   readonly origin: string;
-  /** spawn 启动器 PID；必须等于 pid 文件中的 master PID（启动时已断言）。 */
+  /** spawn 返回的 master PID；由创建语义同时是本实例进程组 ID。 */
   readonly masterPid: number;
-  /** 本实例创建的临时配置/dist 目录（stop() 成功后被删除）。 */
+  /** 本实例创建的临时配置/dist 目录（清理成功后被删除）。 */
   readonly configDir: string;
   /** 本实例监听端口。 */
   readonly listenPort: number;
-  /**
-   * 本实例进程组 ID：master 与其 fork 的一切 worker（含重建的替代
-   * worker 与 master 崩溃后的孤儿）共享该组；测试用它直接验证真实
-   * 存活状态，而不是依赖按命令行匹配的 PID 清单。
-   */
+  /** 本实例进程组 ID（=== masterPid，创建语义保证）。 */
   readonly instancePgid: number;
-  /** 统一清理：SIGTERM 精确 master → 等待进程树退出 → 端口关闭 → 删除目录。 */
+  /** 当前生命周期状态。 */
+  readonly state: NginxLifecycleState;
+  /** 统一清理：组 TERM → 有界等待 → 组 KILL → 有界等待 → 确认 → 删除目录。 */
   stop(): Promise<void>;
-  /**
-   * 上一次清理失败后的重试：丢弃失败的共享 Promise，恢复真实删除，针对
-   * 同一实例身份（masterPid/configDir/listenPort）重新执行完整清理。
-   */
-  retryCleanupAfterFailure(): Promise<void>;
+  /** 上一次清理失败后的受控恢复：重新执行同一清理核心。 */
+  recover(): Promise<void>;
 }
 
 export const findFreePort = async (): Promise<number> => {
@@ -151,19 +172,23 @@ export const findFreePort = async (): Promise<number> => {
   });
 };
 
+/** 故障注入：只影响观测工具（ps/lsof/rm）与注入时机，不改变创建语义。 */
 export interface ServeWithNginxOptions {
-  /** 测试注入：替换 configDir 删除动作，用于确定性模拟清理失败。 */
+  /** 替换 configDir 删除动作（模拟 rm 失败）。 */
   readonly removeConfigDir?: (path: string) => Promise<void>;
-  /** 测试注入：令身份捕获阶段的 ps 查询抛错（模拟查询失败）。 */
+  /** 令身份交叉验证的 ps 查询抛错（模拟观测失效）。 */
   readonly failIdentityQuery?: boolean;
-  /** 测试注入：令身份捕获阶段的 ps 输出为非法值（模拟无效输出）。 */
+  /** 令身份交叉验证的 ps 输出为非法值。 */
   readonly invalidIdentityOutput?: boolean;
-  /** 测试注入：在身份捕获查询 master PGID 的瞬间终止 master，
-   * 确定性复现“身份捕获期间 master 退出”。 */
+  /** 在身份交叉验证的瞬间 SIGKILL master（master 在观测期间退出）。 */
   readonly killMasterDuringIdentityQuery?: boolean;
+  /** 令组枚举的 ps 查询抛错（清理期观测失效 → 清理失败而非误报成功）。 */
+  readonly failGroupEnumeration?: boolean;
 }
 
 const STOP_TIMEOUT_MS = 10_000;
+const POLL_INTERVAL_MS = 100;
+const POLL_ATTEMPTS = Math.ceil(STOP_TIMEOUT_MS / POLL_INTERVAL_MS);
 
 /** 枚举本仓库固定运行时启动的全部 nginx 进程 PID（master 与 worker）。 */
 export const listDevhotNginxPids = async (): Promise<readonly number[]> => {
@@ -186,15 +211,6 @@ export const listDevhotNginxPids = async (): Promise<readonly number[]> => {
 // 以真实 Nginx 服务 distRoot：serving config 的 include 被重写为指向仓库内
 // security-headers.conf，root 指向 distRoot，其余逐字保留。监听端口由调用方
 // 通过临时 nginx 配置动态分配，避免与遗留进程或并行运行冲突。
-//
-// 生命周期契约：
-// - 前台运行只经 CLI `-g "daemon off;"` 强制，配置正文不含 daemon 指令；
-// - 启动成功要求：pid 文件 master PID === child.pid，且 HTTP readiness 后
-//   child 仍存活，且本实例进程树持有监听端口；
-// - 从 configDir 创建开始，任何 setup 失败都清理该精确目录（child 已创建时
-//   走完整进程清理），两类错误以 AggregateError 保留；
-// - stop() 只对精确 master PID 发信号，等待 master 与 worker 全部退出、
-//   端口无监听后，才删除 configDir；进程仍存活时绝不删除目录。
 export const serveWithNginx = async (
   nginxBinaryPath: string,
   distRoot: string,
@@ -227,154 +243,53 @@ export const serveWithNginx = async (
     };
   })();
 
-  // 精确进程存活检查：child.killed 只表示“已发送过信号”，不表示进程已退出，
-  // 绝不能作为存活依据；以 ps 为准。同时确认 PID 仍属于本实例（命令行含
-  // 本实例配置路径），避免误杀 PID 复用的无关进程。
-  const masterAlive = async (): Promise<boolean> => {
-    if (!child || child.pid === undefined) return false;
-    try {
-      const { stdout } = await execFileAsync("ps", [
-        "-p",
-        String(child.pid),
-        "-o",
-        "stat=,command=",
-      ]);
-      // 僵尸态（Z）不算存活；命令行须属于本实例配置。
-      return !stdout.trim().startsWith("Z") && stdout.includes(configDir);
-    } catch {
-      return false;
-    }
-  };
-
-  // 本实例进程身份：nginx 以独立进程组（detached）启动，master 与其 fork
-  // 的一切 worker（含 master 崩溃后 init 接管前 fork 的替代 worker）都
-  // 继承同一 PGID。以 PGID 判定归属可以跨 worker 重建持续追踪，不受
-  // “PID 集合采样是否过期”影响；master 崩溃后孤儿 worker 仍可识别。
-  // 身份必须在启动早期建立并验证：查询失败、输出非法或归属不符时启动
-  // 直接失败，绝不返回身份不完整的实例——缺失 PGID 会让后续清理把
-  // “归属未知”误当“没有实例进程”而提前报成功。
-  let instancePgid: number | undefined;
-  // 启动时捕获的本实例 worker PID（master 存活时按 PPID 枚举）。PGID
-  // 是首选身份；但身份捕获失败/期间 master 退出时，靠这组 PID 完成失败
-  // 收尾（孤儿 worker cmdline 不含 configDir，无法事后识别）。
-  let startupWorkerPids: readonly number[] = [];
-  const captureStartupWorkers = async (): Promise<void> => {
-    if (!child?.pid) return;
-    const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,stat,command"]);
-    const workers: number[] = [];
-    for (const line of stdout.split("\n")) {
-      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
-      if (!match) continue;
-      const pid = Number(match[1]);
-      const ppid = Number(match[2]);
-      const state = match[3] ?? "";
-      const command = match[4] ?? "";
-      if (
-        !state.startsWith("Z") &&
-        command.includes("nginx: worker process") &&
-        ppid === child.pid
-      ) {
-        workers.push(pid);
-      }
-    }
-    startupWorkerPids = workers;
-  };
-  const captureInstancePgid = async (): Promise<number> => {
-    if (instancePgid !== undefined) return instancePgid;
-    if (!child?.pid) {
-      throw new Error(
-        `pinned nginx master exited before identity capture (${identity()})`,
-      );
-    }
+  // ---- 观测原语：ps/lsof 只读；失败与非法输出一律记为 unknown（I3）----
+  /**
+   * 单个 PID 的存活观测。ps -p 对不存在的 PID 以非零状态退出且输出为空
+   *（macOS/Linux 一致），这是“进程不存在”的正常语义，不算观测失败；
+   * 只有输出非空但无法解析、或 ps 以其他方式失败时才是 unknown。
+   */
+  const observePid = async (pid: number): Promise<ProcessObservation> => {
     let stdout: string;
     try {
-      if (options.killMasterDuringIdentityQuery) {
-        // 确定性注入：在身份查询瞬间终止 master（worker 尚未被捕获，
-        // 模拟身份建立前 master 崩溃）。
-        process.kill(child.pid, "SIGKILL");
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-      }
-      if (options.failIdentityQuery) {
-        throw new Error("injected identity query failure");
-      }
-      const result = await execFileAsync("ps", ["-p", String(child.pid), "-o", "pgid="]);
+      const result = await execFileAsync("ps", ["-p", String(pid), "-o", "stat="]);
       stdout = result.stdout;
     } catch (error) {
-      throw new Error(
-        `failed to read process group of master pid ${child.pid}: ${(error as Error).message} (${identity()})`,
-      );
+      const message = error as { stdout?: string; stderr?: string; message: string };
+      // 非零退出 + 无 stdout = PID 不存在（ps 的“查无此进程”语义）。
+      if ((message.stdout ?? "").trim().length === 0) return "exited";
+      return "unknown";
     }
-    if (options.invalidIdentityOutput) {
-      throw new Error(
-        `invalid process group id for master pid ${child.pid}: ${JSON.stringify("not-a-pgid")} (${identity()})`,
-      );
-    }
-    const parsed = Number.parseInt(stdout.trim(), 10);
-    if (!Number.isInteger(parsed) || parsed <= 0) {
-      throw new Error(
-        `invalid process group id for master pid ${child.pid}: ${JSON.stringify(stdout.trim())} (${identity()})`,
-      );
-    }
-    // 归属验证：pgid 必须与 master 的完整 ps 记录一致，防止解析异常值。
-    const verify = await execFileAsync("ps", [
-      "-p",
-      String(child.pid),
-      "-o",
-      "pid=,pgid=",
-    ]);
-    const verifyMatch = verify.stdout.trim().match(/^\s*(\d+)\s+(\d+)\s*$/);
-    const verifyPid = verifyMatch ? Number(verifyMatch[1]) : Number.NaN;
-    const verifyPgid = verifyMatch ? Number(verifyMatch[2]) : Number.NaN;
-    if (verifyPid !== child.pid || verifyPgid !== parsed) {
-      throw new Error(
-        `process group identity mismatch for master pid ${child.pid}: pgid query=${parsed}, ps=${verify.stdout.trim()} (${identity()})`,
-      );
-    }
-    instancePgid = parsed;
-    return parsed;
+    const state = stdout.trim();
+    if (state.length === 0) return "exited";
+    if (state.startsWith("Z")) return "exited"; // 僵尸不算存活
+    return "alive";
   };
 
-  /**
-   * 身份未知时的兜底归属确认：按命令行包含本实例 configDir 判定（master
-   * cmdline 含 configDir；worker 不含）。worker 无法由此识别——因此本函
-   * 数只在“master 已退出”的场景下作为无归属证明使用，绝不能单独作为
-   * “实例已全部退出”的依据。
-   */
-  const anyConfigDirProcessAlive = async (): Promise<boolean> => {
-    const { stdout } = await execFileAsync("ps", ["-eo", "pid,stat,command"]);
-    for (const line of stdout.split("\n")) {
-      const match = line.match(/^\s*(\d+)\s+(\S+)\s+(.*)$/);
-      if (!match) continue;
-      const state = match[2] ?? "";
-      const command = match[3] ?? "";
-      if (!state.startsWith("Z") && command.includes(configDir)) {
-        return true;
-      }
+  /** 进程组存活成员枚举（排除僵尸与 master 自身）；ps 失败 → undefined。 */
+  const enumerateGroup = async (pgid: number): Promise<readonly number[] | undefined> => {
+    if (options.failGroupEnumeration) return undefined;
+    let stdout: string;
+    try {
+      const result = await execFileAsync("ps", ["-eo", "pid,pgid,stat,command"]);
+      stdout = result.stdout;
+    } catch {
+      return undefined;
     }
-    return false;
-  };
-
-  /** 本实例进程组内当前存活的 nginx 进程（排除僵尸）。身份未知（从未
-   * 捕获到 pgid）时返回空集合并由调用方决定语义——启动成功路径不会
-   * 出现该状态（身份失败即启动失败）；清理路径在身份缺失时只依赖
-   * master PID 精确终止。 */
-  const instanceProcesses = async (): Promise<readonly number[]> => {
-    if (instancePgid === undefined) return [];
-    const { stdout } = await execFileAsync("ps", ["-eo", "pid,pgid,stat,command"]);
     const pids: number[] = [];
     for (const line of stdout.split("\n")) {
       const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
       if (!match) continue;
       const pid = Number(match[1]);
-      const pgid = Number(match[2]);
+      const group = Number(match[2]);
       const state = match[3] ?? "";
       const command = match[4] ?? "";
       if (
-        pgid === instancePgid &&
+        group === pgid &&
         !state.startsWith("Z") &&
-        (command.includes("nginx: master process") ||
-          command.includes("nginx: worker process") ||
-          command.includes(`devhot-nginx-${NGINX_VERSION}`))
+        pid !== child?.pid &&
+        (command.includes("nginx: worker process") ||
+          command.includes("nginx: master process"))
       ) {
         pids.push(pid);
       }
@@ -382,281 +297,201 @@ export const serveWithNginx = async (
     return pids;
   };
 
-  // 存活检查排除僵尸态：分离进程组的子进程退出后可能短暂成为僵尸
-  // （Z 状态，ps 仍列出），僵尸不属于“存活”，不得据此判定清理失败。
-  const pidAlive = async (pid: number): Promise<boolean> => {
+  /**
+   * master 存活观测（cmdline 须属于本实例，防 PID 复用误判）。ps -p 的
+   * “查无此进程”退出语义与 observePid 一致地解释为 exited。
+   */
+  const observeMaster = async (): Promise<ProcessObservation> => {
+    if (!child || child.pid === undefined) return "exited";
+    let stdout: string;
     try {
-      const { stdout } = await execFileAsync("ps", ["-p", String(pid), "-o", "stat="]);
-      const state = stdout.trim();
-      return state.length > 0 && !state.startsWith("Z");
-    } catch {
-      return false;
-    }
-  };
-
-  const stopProcessTree = async (failures: string[]): Promise<void> => {
-    if (!child || child.pid === undefined) return;
-    const masterPid = child.pid;
-    const exited = waitForExit(child);
-
-    const signal = (sig: NodeJS.Signals, target?: number): void => {
-      try {
-        if (target !== undefined) {
-          process.kill(target, sig);
-        } else {
-          child!.kill(sig);
-        }
-      } catch (error) {
-        failures.push(
-          `failed to send ${sig} to ${target ?? `master pid ${masterPid}`}: ${error}`,
-        );
-      }
-    };
-
-    // 以进程组身份枚举本实例当前存活 worker（含替代 worker 与孤儿
-    // worker）；身份缺失（启动早期失败）时退回启动时捕获的 worker PID
-    // ——孤儿 worker cmdline 不含 configDir，离开这份清单就无法追踪。
-    let trackedWorkers = (await instanceProcesses()).filter((pid) => pid !== child!.pid);
-    if (trackedWorkers.length === 0) {
-      const aliveAtStartup: number[] = [];
-      for (const pid of startupWorkerPids) {
-        if (pid !== child!.pid && (await pidAlive(pid))) aliveAtStartup.push(pid);
-      }
-      trackedWorkers = aliveAtStartup;
-    }
-    if (await masterAlive()) {
-      signal("SIGTERM");
-    }
-    const termResult = await Promise.race([
-      exited.then(() => "exited" as const),
-      new Promise<"timeout">((resolvePromise) =>
-        setTimeout(() => resolvePromise("timeout"), STOP_TIMEOUT_MS).unref(),
-      ),
-    ]);
-    if (termResult === "timeout") {
-      // SIGTERM 超时且 master 仍存活：必须真正发送 SIGKILL（child.killed 已
-      // 为 true 但进程未退出，不能用其短路）。
-      if (await masterAlive()) {
-        signal("SIGKILL");
-        const killResult = await Promise.race([
-          exited.then(() => "exited" as const),
-          new Promise<"timeout">((resolvePromise) =>
-            setTimeout(() => resolvePromise("timeout"), STOP_TIMEOUT_MS).unref(),
-          ),
-        ]);
-        if (killResult === "timeout" && (await masterAlive())) {
-          failures.push(
-            `master pid ${masterPid} survived SIGTERM and SIGKILL (${identity()})`,
-          );
-        }
-      } else {
-        // 等待期间已退出：退出事件可能在 exitCode 更新前到达，等待 exited 兜底。
-        await exited;
-      }
-    }
-    // master 被 SIGKILL 后 worker 可能被 PID 1 接管并继续监听：给正常退出
-    // 一点时间，然后只对预先捕获的本实例 worker 精确 SIGTERM/SIGKILL。
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 200));
-    let aliveWorkers: number[] = [];
-    for (const workerPid of trackedWorkers) {
-      if (await pidAlive(workerPid)) aliveWorkers.push(workerPid);
-    }
-    if (aliveWorkers.length > 0) {
-      for (const workerPid of aliveWorkers) {
-        signal("SIGTERM", workerPid);
-      }
-      for (let attempt = 0; attempt < 50 && aliveWorkers.length > 0; attempt += 1) {
-        await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-        trackedWorkers = (await instanceProcesses()).filter((pid) => pid !== child!.pid);
-        aliveWorkers = [...trackedWorkers];
-      }
-      if (aliveWorkers.length > 0) {
-        for (const workerPid of aliveWorkers) {
-          signal("SIGKILL", workerPid);
-        }
-        // SIGKILL 后的退出存在调度延迟（CI 容器更明显）：有界轮询等待。
-        for (let attempt = 0; attempt < 50; attempt += 1) {
-          await new Promise((resolvePromise) => setTimeout(resolvePromise, 100));
-          trackedWorkers = (await instanceProcesses()).filter(
-            (pid) => pid !== child!.pid,
-          );
-          aliveWorkers = [...trackedWorkers];
-          if (aliveWorkers.length === 0) break;
-        }
-        if (aliveWorkers.length > 0) {
-          failures.push(
-            `workers ${aliveWorkers.join(",")} survived SIGTERM and SIGKILL (${identity()})`,
-          );
-        }
-      }
-    }
-  };
-
-  const treeState = async (): Promise<{
-    masterAlive: boolean;
-    workersAlive: readonly number[];
-    portListening: boolean;
-  }> => {
-    const allPids = await listDevhotNginxPids();
-    const masterAlive = child?.pid !== undefined && allPids.includes(child.pid);
-    // 以进程组身份枚举本实例存活 worker：跨 worker 重建持续追踪，
-    // 不依赖采样时的 PID 集合。
-    const instancePids = await instanceProcesses();
-    let workersAlive = instancePids.filter((pid) => pid !== child?.pid);
-    if (workersAlive.length === 0 && startupWorkerPids.length > 0) {
-      const aliveAtStartup: number[] = [];
-      for (const pid of startupWorkerPids) {
-        if (pid !== child?.pid && (await pidAlive(pid))) aliveAtStartup.push(pid);
-      }
-      workersAlive = aliveAtStartup;
-    }
-    // 端口归属检查：本实例进程树退出后，端口可能被无关服务占用（例如测试
-    // 的占位服务）。只把“端口仍被本实例进程持有”视为未退出；无关监听者
-    // 不影响本实例资源回收，也不得被停止或等待。
-    let portListening = false;
-    let portOwnedByInstance = false;
-    try {
-      const probe = await fetch(`http://127.0.0.1:${listenPort}/`, {
-        redirect: "manual",
-        signal: AbortSignal.timeout(500),
-      });
-      await probe.arrayBuffer();
-      portListening = true;
+      const result = await execFileAsync("ps", [
+        "-p",
+        String(child.pid),
+        "-o",
+        "stat=,command=",
+      ]);
+      stdout = result.stdout;
     } catch (error) {
-      portListening = (error as Error).name === "TimeoutError";
+      const message = error as { stdout?: string; stderr?: string; message: string };
+      if ((message.stdout ?? "").trim().length === 0) return "exited";
+      return "unknown";
     }
-    if (portListening) {
-      // 监听者若是本实例进程组成员（含替代 worker 与 master 崩溃后的
-      // 孤儿），端口属于本实例，不得放行。
-      if (workersAlive.length > 0 || masterAlive) {
-        portOwnedByInstance = true;
-      } else {
-        // 本实例进程组已无存活成员：以监听进程身份最终确认归属——
-        // 与本进程组无关的监听者（例如测试占位服务）不受影响，也不得
-        // 被停止或等待。
-        try {
-          const { stdout: lsofOut } = await execFileAsync("lsof", [
-            "-nP",
-            `-iTCP:${listenPort}`,
-            "-sTCP:LISTEN",
-            "-t",
-          ]);
-          const listenerPids = lsofOut
-            .split("\n")
-            .map((line) => Number.parseInt(line.trim(), 10))
-            .filter((pid) => Number.isInteger(pid) && pid > 0);
-          const pgidOf = async (pid: number): Promise<number | undefined> => {
-            try {
-              const { stdout } = await execFileAsync("ps", [
-                "-p",
-                String(pid),
-                "-o",
-                "pgid=",
-              ]);
-              return Number.parseInt(stdout.trim(), 10);
-            } catch {
-              return undefined;
-            }
-          };
-          const listenerPgids = await Promise.all(listenerPids.map(pgidOf));
-          if (instancePgid === undefined) {
-            // 身份未知（启动早期失败）：以本实例 configDir 的命令行归属做
-            // 最终确认——master cmdline 含 configDir；worker 由 master fork，
-            // master 已退出且无本实例 cmdline 进程时，端口不可能属于本实例
-            // （例如端口被无关占位服务占用、nginx 绑定失败的启动路径）。
-            // 仍有本实例 cmdline 进程或启动清单 worker 存活时保守视为
-            // 持有（清理失败）。
-            portOwnedByInstance =
-              workersAlive.length > 0 || (await anyConfigDirProcessAlive());
-          } else {
-            // 身份已验证：监听进程 PGID 与本实例组一致即为本实例持有。
-            portOwnedByInstance = listenerPgids.some((pgid) => pgid === instancePgid);
-          }
-        } catch {
-          // lsof 不可用：以本实例进程身份为准——组身份可用时看组内成员；
-          // 身份未知（启动早期失败）时退回 configDir 命令行归属。组内已
-          // 无存活成员且无本实例 cmdline 进程时端口不可能属于本实例；
-          // 否则保守视为本实例仍持有（清理失败），不得当作无关放行
-          // （身份未知绝不等于“没有实例进程”）。
-          if (instancePgid === undefined) {
-            portOwnedByInstance =
-              workersAlive.length > 0 || (await anyConfigDirProcessAlive());
-          } else {
-            portOwnedByInstance =
-              (await instanceProcesses()).length > 0 ||
-              (await anyConfigDirProcessAlive());
-          }
-        }
-      }
-    }
-    return {
-      masterAlive,
-      workersAlive,
-      portListening: portOwnedByInstance,
-    };
+    const trimmed = stdout.trim();
+    if (trimmed.length === 0 || trimmed.startsWith("Z")) return "exited";
+    // 创建语义 + pid 文件双重锚定后，cmdline 仍须含本实例配置。
+    return trimmed.includes(configDir) ? "alive" : "exited";
   };
 
-  let cleanupPromise: Promise<void> | undefined;
-  let cleanupSucceeded = false;
-  const runCleanup = async (context: string): Promise<void> => {
-    const failures: string[] = [];
-    await stopProcessTree(failures);
-    const state = await treeState();
-    if (state.masterAlive) {
-      failures.push(`master still alive after stop signals (${identity()})`);
+  /**
+   * 端口持有归属：区分“端口有监听”与“端口由本实例持有”。
+   * 返回 undefined 表示无法确认（lsof/ps 失效），调用方按未释放处理（I3）。
+   */
+  const portHeldByInstance = async (pgid: number): Promise<boolean | undefined> => {
+    let lsofOut: string;
+    try {
+      const result = await execFileAsync("lsof", [
+        "-nP",
+        `-iTCP:${listenPort}`,
+        "-sTCP:LISTEN",
+        "-t",
+      ]);
+      lsofOut = result.stdout;
+    } catch (error) {
+      const failed = error as { stdout?: string; message: string };
+      // lsof 对“无匹配监听者”返回非零 + 空输出：端口无监听。
+      if ((failed.stdout ?? "").trim().length === 0) return false;
+      return undefined;
     }
-    if (state.workersAlive.length > 0) {
+    const listenerPids = lsofOut
+      .split("\n")
+      .map((line) => Number.parseInt(line.trim(), 10))
+      .filter((pid) => Number.isInteger(pid) && pid > 0);
+    if (listenerPids.length === 0) return false;
+    const listenerPgids = await Promise.all(
+      listenerPids.map(async (pid) => {
+        try {
+          const { stdout } = await execFileAsync("ps", [
+            "-p",
+            String(pid),
+            "-o",
+            "pgid=",
+          ]);
+          const value = Number.parseInt(stdout.trim(), 10);
+          return Number.isInteger(value) && value > 0 ? value : undefined;
+        } catch {
+          return undefined;
+        }
+      }),
+    );
+    if (listenerPgids.some((value) => value === undefined)) return undefined;
+    return listenerPgids.some((value) => value === pgid);
+  };
+
+  // ---- 统一清理核心（I4/I5）-------------------------------------------
+  const stopSignalToGroup = (
+    pgid: number,
+    sig: NodeJS.Signals,
+    failures: string[],
+  ): void => {
+    try {
+      // 对整个进程组发信号：覆盖 master、worker、重建 worker 与孤儿。
+      process.kill(-pgid, sig);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "ESRCH") {
+        // ESRCH：进程组已不存在——所有成员都已退出，这不是失败。
+        return;
+      }
       failures.push(
-        `workers still alive after stop signals: ${state.workersAlive.join(",")} (${identity()})`,
+        `failed to send ${sig} to process group ${pgid}: ${(error as Error).message}`,
       );
     }
-    if (state.portListening) {
-      failures.push(`listen port ${listenPort} still listening (${identity()})`);
+  };
+
+  const waitForGroupExit = async (pgid: number, failures: string[]): Promise<void> => {
+    for (let attempt = 0; attempt < POLL_ATTEMPTS; attempt += 1) {
+      const members = await enumerateGroup(pgid);
+      const master = await observeMaster();
+      if (members !== undefined && master !== "unknown") {
+        if (members.length === 0 && master === "exited") return;
+      }
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, POLL_INTERVAL_MS));
     }
+    const members = await enumerateGroup(pgid);
+    const master = await observeMaster();
+    const survivors = members ?? [];
+    const detail =
+      members === undefined || master === "unknown"
+        ? `could not confirm exit of process group ${pgid} (${identity()})`
+        : `process group ${pgid} survived stop signals: master=${master} workers=[${survivors.join(",")}] (${identity()})`;
+    failures.push(detail);
+  };
+
+  const runCleanup = async (context: string): Promise<void> => {
+    if (child?.pid === undefined) {
+      // 进程从未创建：只回收目录（I1 的最小责任范围）。
+      await removeConfigDir(configDir);
+      return;
+    }
+    const pgid = child.pid; // 创建语义：detached 组长 PID === PGID。
+    const failures: string[] = [];
+
+    // 组信号无条件发送：master 是否存活不作为发送前提——master 可能已
+    // 在清理开始前崩溃，此时孤儿 worker 只能靠组信号终止。
+    // TERM 阶段的超时只意味着“需要升级”，不构成最终失败；最终成败由
+    // KILL 阶段与最终确认决定（I5：升级路径是正常生命周期的一部分）。
+    const termPhase: string[] = [];
+    stopSignalToGroup(pgid, "SIGTERM", termPhase);
+    await waitForGroupExit(pgid, termPhase);
+    {
+      // 组内仍有成员或观测无法确认：升级 KILL 并有界等待。
+      const members = await enumerateGroup(pgid);
+      const needsKill =
+        members === undefined ||
+        members.length > 0 ||
+        (await observeMaster()) === "alive";
+      if (needsKill) {
+        stopSignalToGroup(pgid, "SIGKILL", failures);
+        await waitForGroupExit(pgid, failures);
+      }
+    }
+    // TERM 阶段真实的信号发送失败（非超时）仍需保留。
+    failures.push(...termPhase.filter((message) => message.startsWith("failed to send")));
+
+    // 最终确认（I6）：master 退出 + 组内无存活成员 + 端口不再由本组持有。
+    const masterFinal = await observeMaster();
+    if (masterFinal === "alive") {
+      failures.push(`master still alive after stop signals (${identity()})`);
+    } else if (masterFinal === "unknown") {
+      failures.push(`could not confirm master exit (${identity()})`);
+    }
+    const membersFinal = await enumerateGroup(pgid);
+    if (membersFinal === undefined) {
+      failures.push(`could not enumerate process group ${pgid} (${identity()})`);
+    } else if (membersFinal.length > 0) {
+      failures.push(
+        `workers still alive after stop signals: ${membersFinal.join(",")} (${identity()})`,
+      );
+    }
+    const portHeld = await portHeldByInstance(pgid);
+    if (portHeld === undefined) {
+      failures.push(
+        `could not confirm ownership of listen port ${listenPort} (${identity()})`,
+      );
+    } else if (portHeld) {
+      failures.push(`listen port ${listenPort} still held by instance (${identity()})`);
+    }
+
     if (failures.length > 0) {
-      // 进程树未确认退出：保留 configDir 供诊断，不得删除。
+      // 进程树未确认退出：保留 configDir 供诊断，不得删除（I7）。
       throw new Error(`nginx cleanup failed during ${context}: ${failures.join("; ")}`);
     }
     try {
       await removeConfigDir(configDir);
-      cleanupSucceeded = true;
     } catch (error) {
       throw new Error(
         `nginx cleanup failed during ${context}: failed to remove ${configDir}: ${(error as Error).message} (${identity()})`,
       );
     }
   };
-  const runRetry = async (): Promise<void> => {
-    // 只在上次清理失败后执行：恢复真实删除并重跑完整清理。
-    removeConfigDir = realRemove;
-    cleanupPromise = runCleanup("retry");
-    return cleanupPromise;
-  };
-  const cleanupOnce = (context: string): Promise<void> => {
-    cleanupPromise ??= runCleanup(context);
-    return cleanupPromise;
-  };
+
+  // 并发/重复清理收敛（I4）：共享同一 Promise；成功后不再向可能复用的
+  // 编号发信号（直接返回已完成结果）。
+  let cleanupPromise: Promise<void> | undefined;
+  let lifecycleState: NginxLifecycleState = "ready";
 
   let handlingSetupFailure = false;
   const cleanupOnSetupFailure = async (setupError: unknown): Promise<never> => {
     // 防重入：本函数抛出的错误不得再次进入外层 catch 被二次包装。
     if (handlingSetupFailure) throw setupError;
     handlingSetupFailure = true;
+    lifecycleState = "cleaning";
     const setupErrorTyped = setupError as Error;
-    if (!child) {
-      try {
-        await removeConfigDir(configDir);
-      } catch (removeError) {
-        throw new AggregateError(
-          [setupErrorTyped, removeError as Error],
-          "nginx setup failed and directory cleanup failed",
-        );
-      }
-      throw setupErrorTyped;
-    }
     try {
-      await cleanupOnce("setup");
+      await runCleanup("setup");
     } catch (cleanupError) {
+      lifecycleState = "cleanup-failed";
       throw new AggregateError(
         [setupErrorTyped, cleanupError as Error],
         "nginx setup failed and process cleanup failed",
@@ -702,9 +537,9 @@ export const serveWithNginx = async (
     await writeFile(configPath, rendered);
 
     await exec(nginxBinaryPath, ["-t", "-c", configPath], configDir);
-    // detached: 独立进程组。测试可用 SIGSTOP 暂停 master 验证 SIGKILL 升级，
-    // 且不会把停止状态传播到测试运行器的终端进程组；生命周期仍由本文件
-    // 显式管理（stop/SIGKILL 均按精确 PID 发送）。
+    // detached: 独立进程组，child.pid 即组长 PID（创建语义）。测试可用
+    // SIGSTOP 暂停 master 验证 SIGKILL 升级，且不会把停止状态传播到测试
+    // 运行器的终端进程组；清理只按本进程组发信号。
     child = spawn(nginxBinaryPath, ["-c", configPath, "-g", "daemon off;"], {
       cwd: configDir,
       stdio: "ignore",
@@ -736,16 +571,10 @@ export const serveWithNginx = async (
           ready = true;
           break;
         }
-      } catch (error) {
+      } catch {
         // fetch 失败可能是端口未开（重试）或占位服务挂断（nginx 已死，重试
         // 会命中上方的 exitCode 检查）。
-        void error;
         await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
-        if (attempt === 99) {
-          await cleanupOnSetupFailure(
-            new Error(`pinned nginx did not become reachable (${identity()})`),
-          );
-        }
       }
     }
     if (!ready) {
@@ -754,7 +583,7 @@ export const serveWithNginx = async (
       );
     }
 
-    // 权威身份校验：pid 文件 master PID 必须等于 child.pid。
+    // 权威身份校验：pid 文件 master PID 必须等于 child.pid（创建语义）。
     const pidFile = join(configDir, "nginx.pid");
     let masterPidFromFile: number | undefined;
     try {
@@ -779,26 +608,59 @@ export const serveWithNginx = async (
       );
     }
     const allPids = await listDevhotNginxPids();
-    if (!allPids.includes(child.pid!)) {
+    if (child.pid === undefined || !allPids.includes(child.pid)) {
       await cleanupOnSetupFailure(
         new Error(
           `listen port ${listenPort} is not served by this nginx process tree (${identity()})`,
         ),
       );
     }
-    // 在身份（PGID）捕获之前先记录 worker PID：身份捕获失败或期间
-    // master 退出时，失败收尾仍可按 PID 终止 worker，不会因身份缺失而
-    // 把孤儿 worker 当作无关进程放行。
-    await captureStartupWorkers();
-    // 启动成功即捕获并验证本实例进程组身份（PGID）：master 与其 fork
-    // 的一切 worker（含后续重建的替代 worker）都继承该组，master 崩溃
-    // 后仍可按组识别孤儿 worker。查询失败/输出非法/归属不符均视为启动
-    // 失败，由 cleanupOnSetupFailure 走完整进程清理并保留两类错误。
-    const capturedPgid = await captureInstancePgid();
-    if ((await instanceProcesses()).length === 0) {
+
+    // 身份交叉验证：创建语义给出 PGID === child.pid；用 ps 复核一次。
+    // 观测失败/输出非法/期间 master 退出都使启动失败并走完整清理（I2/I3）
+    // ——清理身份仍来自创建语义，不依赖这次观测成功。
+    if (child.pid === undefined) {
+      await cleanupOnSetupFailure(
+        new Error(`pinned nginx master pid unavailable after readiness (${identity()})`),
+      );
+    }
+    const masterPid = child.pid as number;
+    if (options.killMasterDuringIdentityQuery) {
+      process.kill(masterPid, "SIGKILL");
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+    }
+    if (options.failIdentityQuery) {
       await cleanupOnSetupFailure(
         new Error(
-          `instance process group ${capturedPgid} has no live members after identity capture (${identity()})`,
+          `failed to verify process group of master pid ${child.pid}: injected query failure (${identity()})`,
+        ),
+      );
+    }
+    try {
+      const { stdout } = await execFileAsync("ps", [
+        "-p",
+        String(child.pid),
+        "-o",
+        "pgid=",
+      ]);
+      if (options.invalidIdentityOutput) {
+        throw new Error('invalid process group id output: "not-a-pgid"');
+      }
+      const parsed = Number.parseInt(stdout.trim(), 10);
+      if (!Number.isInteger(parsed) || parsed <= 0) {
+        throw new Error(
+          `invalid process group id output: ${JSON.stringify(stdout.trim())}`,
+        );
+      }
+      if (parsed !== child.pid) {
+        throw new Error(
+          `process group ${parsed} does not match detached spawn semantics (expected ${child.pid})`,
+        );
+      }
+    } catch (error) {
+      await cleanupOnSetupFailure(
+        new Error(
+          `failed to verify process group of master pid ${child.pid}: ${(error as Error).message} (${identity()})`,
         ),
       );
     }
@@ -810,29 +672,41 @@ export const serveWithNginx = async (
     await cleanupOnSetupFailure(error);
   }
 
-  // 身份已在启动路径验证；此处仅为类型收窄（运行时不可能为 undefined）。
-  const validatedPgid = instancePgid as number;
+  const finalMasterPid = child!.pid!;
   return {
     origin: `http://127.0.0.1:${listenPort}`,
-    masterPid: child!.pid!,
+    masterPid: finalMasterPid,
     configDir,
     listenPort,
-    instancePgid: validatedPgid,
-    stop: () => cleanupOnce("stop"),
-    retryCleanupAfterFailure: () => {
-      // 已成功的清理保持幂等：不重跑、直接返回原成功结果。
-      if (cleanupPromise !== undefined) {
-        return cleanupPromise
-          .then(
-            () => undefined,
-            () => undefined,
-          )
-          .then(() => {
-            if (cleanupSucceeded) return Promise.resolve();
-            return runRetry();
-          });
-      }
-      return runRetry();
+    instancePgid: finalMasterPid,
+    get state() {
+      return lifecycleState;
     },
-  };
+    stop: async () => {
+      if (lifecycleState === "cleaned") return; // 成功后不再发信号（防 PID 复用）
+      lifecycleState = "cleaning";
+      try {
+        cleanupPromise ??= runCleanup("stop");
+        await cleanupPromise;
+        lifecycleState = "cleaned";
+      } catch (error) {
+        lifecycleState = "cleanup-failed";
+        throw error;
+      }
+    },
+    recover: async () => {
+      // 受控恢复：仅在上次清理失败后重新执行同一清理核心；成功路径幂等。
+      if (lifecycleState === "cleaned") return;
+      removeConfigDir = realRemove;
+      lifecycleState = "cleaning";
+      try {
+        cleanupPromise = runCleanup("recover");
+        await cleanupPromise;
+        lifecycleState = "cleaned";
+      } catch (error) {
+        lifecycleState = "cleanup-failed";
+        throw error;
+      }
+    },
+  } satisfies NginxServer;
 };
