@@ -20,14 +20,121 @@ const execFileAsync = promisify(execFile) as (
   args: string[],
 ) => Promise<{ stdout: string }>;
 
+// 构建配方身份：缓存命中必须绑定“实际内容 + 构建配方”，不能绑定缓存
+// 路径名。任何配方要素变化（版本、tarball 指纹、configure 参数、配方
+// 版本、平台、架构）都会产生新的缓存目录身份，旧缓存不会被当作当前
+// 固定运行时复用。
+const RUNTIME_RECIPE_VERSION = 2;
+const NGINX_CONFIGURE_ARGS = [
+  // rewrite 模块必须启用：error_page/内部重定向按状态改写缓存策略
+  // 依赖它；此前为最小化构建而排除。
+  "--without-http_gzip_module",
+] as const;
+const recipeFingerprint = createHash("sha256")
+  .update(
+    JSON.stringify({
+      recipeVersion: RUNTIME_RECIPE_VERSION,
+      nginxVersion: NGINX_VERSION,
+      tarballSha256: NGINX_TARBALL_SHA256,
+      configureArgs: NGINX_CONFIGURE_ARGS,
+      platform: process.platform,
+      arch: process.arch,
+    }),
+  )
+  .digest("hex");
 const runtimeRoot = join(
   tmpdir(),
-  `devhot-nginx-${NGINX_VERSION}-${NGINX_TARBALL_SHA256.slice(0, 12)}`,
+  `devhot-nginx-${NGINX_VERSION}-${recipeFingerprint.slice(0, 16)}`,
 );
 const nginxBinary = join(runtimeRoot, "sbin", "nginx");
+const installMarkerPath = join(runtimeRoot, ".install-complete");
 
 const sha256 = (value: Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
+
+interface RuntimeInstallMarker {
+  readonly schemaVersion: 2;
+  readonly nginxVersion: string;
+  readonly tarballSha256: string;
+  readonly recipeFingerprint: string;
+  readonly binarySha256: string;
+}
+
+const readMarker = async (): Promise<RuntimeInstallMarker | undefined> => {
+  try {
+    const parsed = JSON.parse(await readFile(installMarkerPath, "utf8")) as unknown;
+    if (
+      typeof parsed !== "object" ||
+      parsed === null ||
+      (parsed as { schemaVersion?: unknown }).schemaVersion !== 2 ||
+      typeof (parsed as { nginxVersion?: unknown }).nginxVersion !== "string" ||
+      typeof (parsed as { tarballSha256?: unknown }).tarballSha256 !== "string" ||
+      typeof (parsed as { recipeFingerprint?: unknown }).recipeFingerprint !== "string" ||
+      typeof (parsed as { binarySha256?: unknown }).binarySha256 !== "string"
+    ) {
+      return undefined;
+    }
+    return parsed as RuntimeInstallMarker;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * 原始执行：同时捕获 stdout 与 stderr（nginx -V 把版本信息写到 stderr，
+ * promisify(execFile) 的成功路径拿不到 stderr）。
+ */
+const execCapture = (
+  command: string,
+  args: readonly string[],
+): Promise<{ stdout: string; stderr: string; code: number | null }> =>
+  new Promise((resolvePromise, rejectPromise) => {
+    execFile(command, [...args], { encoding: "utf8" }, (error, stdout, stderr) => {
+      if (error) {
+        if (typeof (error as { code?: unknown }).code === "number") {
+          resolvePromise({
+            stdout: stdout ?? "",
+            stderr: stderr ?? "",
+            code: (error as { code: number }).code,
+          });
+          return;
+        }
+        rejectPromise(error);
+        return;
+      }
+      resolvePromise({ stdout: stdout ?? "", stderr: stderr ?? "", code: 0 });
+    });
+  });
+
+/**
+ * 解析 nginx -V 输出，验证版本、关键 configure 参数与编译期 prefix。
+ * 伪二进制（如“exit 0”脚本）无法产出带版本前缀的输出，直接判为不匹配；
+ * prefix 不匹配（如从 staging 复制来的产物，其编译期 temp/log 路径指向
+ * 已删除目录）同样拒绝。
+ */
+const verifyNginxVersionOutput = (
+  versionOutput: string,
+): { ok: boolean; detail: string } => {
+  if (!versionOutput.includes(`nginx version: nginx/${NGINX_VERSION}`)) {
+    return {
+      ok: false,
+      detail: `unexpected version output: ${JSON.stringify(versionOutput.trim().slice(0, 80))}`,
+    };
+  }
+  if (!versionOutput.includes(`--prefix=${runtimeRoot}`)) {
+    return { ok: false, detail: `compiled prefix does not match ${runtimeRoot}` };
+  }
+  for (const arg of NGINX_CONFIGURE_ARGS) {
+    if (!versionOutput.includes(arg)) {
+      return { ok: false, detail: `configure argument missing from binary: ${arg}` };
+    }
+  }
+  return { ok: true, detail: "" };
+};
+
+// 同进程内并发准备缓存时收敛为同一次构建（进程间并发由锁文件 + marker
+// 门控保护：半安装状态不会被 verifyCachedRuntime 接受）。
+let runtimePreparePromise: Promise<string> | undefined;
 
 const exec = (command: string, args: readonly string[], cwd: string): Promise<void> =>
   new Promise((resolvePromise, rejectPromise) => {
@@ -48,60 +155,172 @@ const exists = async (path: string): Promise<boolean> => {
   }
 };
 
-// 安装固定运行时；已存在且校验通过时直接复用（缓存只加速准备，不改变结果）。
+/**
+ * 校验已存在的缓存是否与当前构建配方完全一致：marker schema、配方
+ * 指纹、二进制实际 SHA-256、nginx -V 版本与 configure 参数。任一不符
+ * 都不当作固定运行时（调用方会重建；不广泛删除其他缓存目录）。
+ */
+const verifyCachedRuntime = async (): Promise<boolean> => {
+  if (!(await exists(nginxBinary))) return false;
+  const marker = await readMarker();
+  if (marker === undefined) return false;
+  if (
+    marker.nginxVersion !== NGINX_VERSION ||
+    marker.tarballSha256 !== NGINX_TARBALL_SHA256 ||
+    marker.recipeFingerprint !== recipeFingerprint
+  ) {
+    return false;
+  }
+  // 校验实际二进制内容指纹，而不是只执行一个退出码为 0 的文件。
+  let binarySha: string;
+  try {
+    binarySha = sha256(await readFile(nginxBinary));
+  } catch {
+    return false;
+  }
+  if (binarySha !== marker.binarySha256) return false;
+  // 解析 nginx -V：伪二进制无法伪造版本行与 configure 参数。
+  try {
+    const captured = await execCapture(nginxBinary, ["-V"]);
+    const combined = `${captured.stdout}\n${captured.stderr}`;
+    return verifyNginxVersionOutput(combined).ok;
+  } catch {
+    return false;
+  }
+};
+
+/** 简单锁文件互斥：内容为持锁 PID；持锁进程不存在时视为陈旧可抢占。 */
+const acquireLock = async (lockPath: string): Promise<boolean> => {
+  try {
+    const content = await readFile(lockPath, "utf8");
+    const holder = Number.parseInt(content.trim(), 10);
+    if (Number.isInteger(holder) && holder !== process.pid) {
+      const holderAlive = await execCapture("ps", ["-p", String(holder)])
+        .then((result) => result.code === 0 && result.stdout.trim().length > 0)
+        .catch(() => false);
+      if (holderAlive) return false;
+    }
+  } catch {
+    // 无锁文件：可获取。
+  }
+  await writeFile(lockPath, `${process.pid}\n`);
+  return true;
+};
+
+const releaseLock = async (lockPath: string): Promise<void> => {
+  try {
+    const content = await readFile(lockPath, "utf8");
+    if (Number.parseInt(content.trim(), 10) === process.pid) {
+      await rm(lockPath, { force: true });
+    }
+  } catch {
+    // 锁已不存在。
+  }
+};
+
+// 安装固定运行时：缓存命中必须通过内容校验；marker 只在完整构建与全部
+// 验证成功后原子写入，半安装状态不会被接受。
 export const ensureNginxRuntime = async (): Promise<string> => {
-  if (await exists(nginxBinary)) {
-    await exec(nginxBinary, ["-v"], runtimeRoot);
+  runtimePreparePromise ??= prepareNginxRuntime();
+  try {
+    return await runtimePreparePromise;
+  } catch (error) {
+    runtimePreparePromise = undefined;
+    throw error;
+  }
+};
+
+const prepareNginxRuntime = async (): Promise<string> => {
+  if (await verifyCachedRuntime()) {
     return nginxBinary;
   }
-
-  const markerPath = join(runtimeRoot, ".install-complete");
-  if (await exists(markerPath)) {
-    throw new Error("pinned nginx runtime cache is inconsistent; remove it and retry");
+  const lockPath = `${runtimeRoot}.lock`;
+  await mkdir(dirname(runtimeRoot), { recursive: true });
+  if (!(await acquireLock(lockPath))) {
+    // 其他进程正在构建：等待其完成（构建者异常退出且缓存未就绪时接管）。
+    for (let attempt = 0; attempt < 600; attempt += 1) {
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+      if (await verifyCachedRuntime()) return nginxBinary;
+      if (!(await exists(lockPath))) break;
+    }
+    if (await verifyCachedRuntime()) return nginxBinary;
+    await releaseLock(lockPath);
+    if (!(await acquireLock(lockPath))) {
+      throw new Error("pinned nginx runtime cache is locked by another process");
+    }
   }
+  try {
+    // 当前缓存目录与配方不符（可能为伪内容、半安装或旧配方）：只处理
+    // 这一精确目标，不删除其他 devhot-nginx-* 目录。
+    await rm(runtimeRoot, { recursive: true, force: true });
+    await mkdir(join(runtimeRoot, "src"), { recursive: true });
 
-  const staging = join(runtimeRoot, ".staging");
-  await rm(runtimeRoot, { recursive: true, force: true });
-  await mkdir(join(staging, "src"), { recursive: true });
+    const sourceRoot = join(runtimeRoot, "src", `nginx-${NGINX_VERSION}`);
+    try {
+      const tarball = Buffer.from(
+        await (await fetch(NGINX_URL, { redirect: "follow" })).arrayBuffer(),
+      );
+      if (sha256(tarball) !== NGINX_TARBALL_SHA256) {
+        throw new Error("pinned nginx tarball sha256 mismatch");
+      }
+      const tarballPath = join(runtimeRoot, `nginx-${NGINX_VERSION}.tar.gz`);
+      await writeFile(tarballPath, tarball);
+      await exec(
+        "tar",
+        ["-xzf", `nginx-${NGINX_VERSION}.tar.gz`, "-C", "src"],
+        runtimeRoot,
+      );
+      // 直接以最终位置为 --prefix 安装（nginx 把 prefix 编译进二进制，
+      // 供 temp/log 路径使用；跨目录复制会得到指向已删除 staging 的
+      // 编译期路径）。半安装由 marker 门控：marker 只在完整构建与全部
+      // 验证后原子写入，无 marker 的目录不会被 verifyCachedRuntime 接受。
+      await exec(
+        join(sourceRoot, "configure"),
+        [
+          `--prefix=${runtimeRoot}`,
+          `--sbin-path=${nginxBinary}`,
+          ...NGINX_CONFIGURE_ARGS,
+        ],
+        sourceRoot,
+      );
+      await exec("make", ["-j", "4"], sourceRoot);
+      await exec("make", ["install"], sourceRoot);
+    } finally {
+      // 源码目录与 tarball 仅构建期需要；安装完成后移除（缓存保持精简）。
+      await rm(join(runtimeRoot, "src"), { recursive: true, force: true }).catch(
+        () => {},
+      );
+      await rm(join(runtimeRoot, `nginx-${NGINX_VERSION}.tar.gz`), {
+        force: true,
+      }).catch(() => {});
+    }
 
-  const tarball = Buffer.from(
-    await (await fetch(NGINX_URL, { redirect: "follow" })).arrayBuffer(),
-  );
-  if (sha256(tarball) !== NGINX_TARBALL_SHA256) {
-    throw new Error("pinned nginx tarball sha256 mismatch");
+    if (!(await exists(nginxBinary))) {
+      throw new Error("pinned nginx binary is missing after install");
+    }
+    const binarySha = sha256(await readFile(nginxBinary));
+    // 内容验证：版本输出与 configure 参数（同时捕获 stdout 与 stderr）。
+    const captured = await execCapture(nginxBinary, ["-V"]);
+    const verdict = verifyNginxVersionOutput(`${captured.stdout}\n${captured.stderr}`);
+    if (!verdict.ok) {
+      throw new Error(`built nginx binary failed verification: ${verdict.detail}`);
+    }
+    // marker 只在完整构建与验证成功后原子写入（临时文件 + rename）。
+    const marker: RuntimeInstallMarker = {
+      schemaVersion: 2,
+      nginxVersion: NGINX_VERSION,
+      tarballSha256: NGINX_TARBALL_SHA256,
+      recipeFingerprint: recipeFingerprint,
+      binarySha256: binarySha,
+    };
+    const markerTemp = `${installMarkerPath}.tmp-${process.pid}-${Date.now()}`;
+    await writeFile(markerTemp, `${JSON.stringify(marker, null, 2)}\n`);
+    const { rename } = await import("node:fs/promises");
+    await rename(markerTemp, installMarkerPath);
+    return nginxBinary;
+  } finally {
+    await releaseLock(lockPath);
   }
-  const tarballPath = join(staging, `nginx-${NGINX_VERSION}.tar.gz`);
-  await writeFile(tarballPath, tarball);
-  await exec("tar", ["-xzf", tarballPath, "-C", "src"], staging);
-
-  const sourceRoot = join(staging, "src", `nginx-${NGINX_VERSION}`);
-  await exec(
-    join(sourceRoot, "configure"),
-    [
-      `--prefix=${runtimeRoot}`,
-      `--sbin-path=${nginxBinary}`,
-      // rewrite 模块必须启用：error_page/内部重定向按状态改写缓存策略
-      // 依赖它；此前为最小化构建而排除。
-      "--without-http_gzip_module",
-    ],
-    sourceRoot,
-  );
-  await exec("make", ["-j", "4"], sourceRoot);
-  await exec("make", ["install"], sourceRoot);
-
-  if (!(await exists(nginxBinary))) {
-    throw new Error("pinned nginx binary is missing after install");
-  }
-  await writeFile(markerPath, `${NGINX_VERSION} ${NGINX_TARBALL_SHA256}\n`);
-  const previous = await readFile(nginxBinary);
-  await rm(join(staging, "src", `nginx-${NGINX_VERSION}`, "objs"), {
-    recursive: true,
-    force: true,
-  }).catch(() => {});
-  // make install 已写入最终位置；staging 仅保留 tarball 与源码目录供追溯。
-  const marker2 = join(runtimeRoot, ".binary-check");
-  await writeFile(marker2, sha256(previous));
-  return nginxBinary;
 };
 
 // ---------------------------------------------------------------------------
@@ -158,6 +377,47 @@ export interface NginxServer {
   recover(): Promise<void>;
 }
 
+/**
+ * 资源清理能力：从资源创建时刻起始终可达（I1/R1）。即使启动函数抛错，
+ * 调用方也能通过 NginxSetupError.resource 拿到该能力，无需解析错误
+ * 字符串、扫描全机进程或扫描临时目录。
+ *
+ * 迟到恢复的复用安全：绝不无条件向裸编号发信号。信号策略按当前观测
+ * 决定——master 仍被证明存活（cmdline 绑定 configDir）时对整个进程组
+ * 发信号；master 已退出时只对“仍属于该进程组”的成员逐一确认后发信号。
+ */
+export interface NginxResourceHandle {
+  /** 实例身份（创建时确定，不可变）。 */
+  readonly configDir: string;
+  readonly listenPort: number;
+  /** 创建语义身份：detached 组长 PID === PGID。 */
+  readonly instancePgid: number;
+  /** master PID（创建时记录；迟到恢复时仅作诊断参考，不作为发信号依据）。 */
+  readonly masterPid: number | undefined;
+  /** 受控恢复：重新执行完整清理核心（外部条件修复后调用）。 */
+  recover(): Promise<void>;
+}
+
+/** 启动失败错误：携带结构化资源与恢复能力，双错误保留。 */
+export class NginxSetupError extends Error {
+  readonly resource: NginxResourceHandle;
+  readonly setupError: Error;
+  readonly cleanupError: Error | undefined;
+
+  constructor(
+    message: string,
+    resource: NginxResourceHandle,
+    setupError: Error,
+    cleanupError: Error | undefined,
+  ) {
+    super(message);
+    this.name = "NginxSetupError";
+    this.resource = resource;
+    this.setupError = setupError;
+    this.cleanupError = cleanupError;
+  }
+}
+
 export const findFreePort = async (): Promise<number> => {
   const { createServer } = await import("node:net");
   return new Promise((resolvePromise, rejectPromise) => {
@@ -184,6 +444,16 @@ export interface ServeWithNginxOptions {
   readonly killMasterDuringIdentityQuery?: boolean;
   /** 令组枚举的 ps 查询抛错（清理期观测失效 → 清理失败而非误报成功）。 */
   readonly failGroupEnumeration?: boolean;
+  /**
+   * 测试注入：模拟 master 观测的 ps 以异常状态码失败（如 2、空 stdout）。
+   * 只有可识别的 0/1/2 退出码可解读输出；其他状态码一律 UNKNOWN。
+   */
+  readonly masterObservationExitCode?: number;
+  /**
+   * 测试注入：模拟 lsof 以 127（命令不存在）失败。用于组合观测失效
+   * 回归：进程组 UNKNOWN + lsof 不可用不得放行清理。
+   */
+  readonly lsofExitCode?: number;
 }
 
 const STOP_TIMEOUT_MS = 10_000;
@@ -243,41 +513,86 @@ export const serveWithNginx = async (
     };
   })();
 
-  // ---- 观测原语：ps/lsof 只读；失败与非法输出一律记为 unknown（I3）----
+  // ---- 观测原语：ps/lsof 只读。返回结构化命令结果，只有可明确识别的
+  // ---- “目标不存在”语义才允许折叠为 EXITED；其余失败一律 UNKNOWN（I3）。
+  /** 命令执行的结构化结果：退出码与输出分离，不用空 stdout 猜测语义。 */
+  type ObserverResult = Readonly<
+    | { kind: "ok"; stdout: string; stderr: string }
+    | { kind: "failed"; code: number | string; stdout: string; stderr: string }
+  >;
+  const runObserver = (
+    command: string,
+    args: readonly string[],
+  ): Promise<ObserverResult> =>
+    execCapture(command, args).then(
+      (result): ObserverResult =>
+        result.code === 0
+          ? { kind: "ok", stdout: result.stdout, stderr: result.stderr }
+          : {
+              kind: "failed",
+              code: result.code ?? "unknown",
+              stdout: result.stdout,
+              stderr: result.stderr,
+            },
+      (error: unknown): ObserverResult => {
+        const failed = error as {
+          code?: number | string;
+          stdout?: string;
+          stderr?: string;
+        };
+        return {
+          kind: "failed",
+          code: failed.code ?? "unknown",
+          stdout: failed.stdout ?? "",
+          stderr: failed.stderr ?? "",
+        };
+      },
+    );
+
   /**
-   * 单个 PID 的存活观测。ps -p 对不存在的 PID 以非零状态退出且输出为空
-   *（macOS/Linux 一致），这是“进程不存在”的正常语义，不算观测失败；
-   * 只有输出非空但无法解析、或 ps 以其他方式失败时才是 unknown。
+   * 工具可执行性判定：ENOENT/EACCES/EPERM（spawn 层失败，code 为字符串）
+   * 与异常退出码（127 命令不存在、126 不可执行、2 用法错误、其他）一律
+   * 不可信。只有 0（成功）与 1（BSD ps/lsof 惯用的“查无目标”退出码）
+   * 的输出可以解读；2 与其他状态码无法区分“目标不存在”与“工具自身
+   * 异常”，一律 UNKNOWN。
+   */
+  const toolExecutionUsable = (code: number | string): boolean => {
+    if (typeof code !== "number") return false;
+    return code === 0 || code === 1;
+  };
+
+  /**
+   * 单个 PID 的存活观测（统一入口；所有 PID 观测——含 master——都经过
+   * 这里，不存在平行语义）。
    */
   const observePid = async (pid: number): Promise<ProcessObservation> => {
-    let stdout: string;
-    try {
-      const result = await execFileAsync("ps", ["-p", String(pid), "-o", "stat="]);
-      stdout = result.stdout;
-    } catch (error) {
-      const message = error as { stdout?: string; stderr?: string; message: string };
-      // 非零退出 + 无 stdout = PID 不存在（ps 的“查无此进程”语义）。
-      if ((message.stdout ?? "").trim().length === 0) return "exited";
+    if (
+      options.masterObservationExitCode !== undefined &&
+      pid === child?.pid &&
+      !toolExecutionUsable(options.masterObservationExitCode)
+    ) {
+      // 注入的异常退出码：不可解读 → UNKNOWN（绝不折叠为 EXITED）。
       return "unknown";
     }
-    const state = stdout.trim();
-    if (state.length === 0) return "exited";
+    const result = await runObserver("ps", ["-p", String(pid), "-o", "stat="]);
+    if (result.kind === "failed" && !toolExecutionUsable(result.code)) {
+      return "unknown";
+    }
+    const state = result.stdout.trim();
+    if (state.length === 0) return "exited"; // 退出码 1 + 空输出 = 查无此进程
     if (state.startsWith("Z")) return "exited"; // 僵尸不算存活
     return "alive";
   };
 
-  /** 进程组存活成员枚举（排除僵尸与 master 自身）；ps 失败 → undefined。 */
+  /** 进程组存活成员枚举（排除僵尸与 master 自身）；ps 无法执行 → undefined。 */
   const enumerateGroup = async (pgid: number): Promise<readonly number[] | undefined> => {
     if (options.failGroupEnumeration) return undefined;
-    let stdout: string;
-    try {
-      const result = await execFileAsync("ps", ["-eo", "pid,pgid,stat,command"]);
-      stdout = result.stdout;
-    } catch {
+    const result = await runObserver("ps", ["-eo", "pid,pgid,stat,command"]);
+    if (result.kind === "failed" && !toolExecutionUsable(result.code)) {
       return undefined;
     }
     const pids: number[] = [];
-    for (const line of stdout.split("\n")) {
+    for (const line of result.stdout.split("\n")) {
       const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
       if (!match) continue;
       const pid = Number(match[1]);
@@ -298,89 +613,110 @@ export const serveWithNginx = async (
   };
 
   /**
-   * master 存活观测（cmdline 须属于本实例，防 PID 复用误判）。ps -p 的
-   * “查无此进程”退出语义与 observePid 一致地解释为 exited。
+   * master 存活观测（cmdline 须属于本实例，防 PID 复用误判）。
+   * 基础存活语义统一经过 observePid（单一 PID 观测入口），其上叠加
+   * cmdline 归属校验——不存在平行的 PID 语义。
    */
   const observeMaster = async (): Promise<ProcessObservation> => {
     if (!child || child.pid === undefined) return "exited";
-    let stdout: string;
-    try {
-      const result = await execFileAsync("ps", [
-        "-p",
-        String(child.pid),
-        "-o",
-        "stat=,command=",
-      ]);
-      stdout = result.stdout;
-    } catch (error) {
-      const message = error as { stdout?: string; stderr?: string; message: string };
-      if ((message.stdout ?? "").trim().length === 0) return "exited";
+    const liveness = await observePid(child.pid);
+    if (liveness !== "alive") return liveness;
+    // PID 存活后，cmdline 仍须属于本实例（创建语义 + pid 文件双重锚定），
+    // 防止 PID 复用后被误认为本实例 master。
+    const result = await runObserver("ps", ["-p", String(child.pid), "-o", "command="]);
+    if (result.kind === "failed" && !toolExecutionUsable(result.code)) {
       return "unknown";
     }
-    const trimmed = stdout.trim();
-    if (trimmed.length === 0 || trimmed.startsWith("Z")) return "exited";
-    // 创建语义 + pid 文件双重锚定后，cmdline 仍须含本实例配置。
-    return trimmed.includes(configDir) ? "alive" : "exited";
+    return result.stdout.includes(configDir) ? "alive" : "exited";
   };
 
   /**
    * 端口持有归属：区分“端口有监听”与“端口由本实例持有”。
-   * 返回 undefined 表示无法确认（lsof/ps 失效），调用方按未释放处理（I3）。
+   * lsof 是可选观测：当实例进程组已被可靠证明不存在时，端口不可能再
+   * 由该实例持有（返回 false）；当进程组状态为 UNKNOWN 时，lsof 缺失
+   * 不得放行（返回 undefined，调用方按未释放处理）。
    */
-  const portHeldByInstance = async (pgid: number): Promise<boolean | undefined> => {
-    let lsofOut: string;
-    try {
-      const result = await execFileAsync("lsof", [
-        "-nP",
-        `-iTCP:${listenPort}`,
-        "-sTCP:LISTEN",
-        "-t",
-      ]);
-      lsofOut = result.stdout;
-    } catch (error) {
-      const failed = error as { stdout?: string; message: string };
-      // lsof 对“无匹配监听者”返回非零 + 空输出：端口无监听。
-      if ((failed.stdout ?? "").trim().length === 0) return false;
-      return undefined;
+  const portHeldByInstance = async (
+    pgid: number,
+    groupState: {
+      readonly master: ProcessObservation;
+      readonly members: readonly number[] | undefined;
+    },
+  ): Promise<boolean | undefined> => {
+    // 证明链第一环：进程组已可靠证明不存在 → 端口不可能由本实例持有。
+    const groupReliablyGone =
+      groupState.master === "exited" &&
+      groupState.members !== undefined &&
+      groupState.members.length === 0;
+    if (groupReliablyGone) return false;
+
+    // 进程组状态未知或有存活成员：必须用 lsof 确认监听者归属。
+    if (options.lsofExitCode !== undefined) {
+      if (!toolExecutionUsable(options.lsofExitCode)) {
+        return undefined; // lsof 不可用（如 127）：UNKNOWN，不得放行
+      }
     }
-    const listenerPids = lsofOut
+    const lsofResult = await runObserver("lsof", [
+      "-nP",
+      `-iTCP:${listenPort}`,
+      "-sTCP:LISTEN",
+      "-t",
+    ]);
+    if (lsofResult.kind === "failed" && !toolExecutionUsable(lsofResult.code)) {
+      return undefined; // 工具不可用：UNKNOWN，不得放行
+    }
+    const listenerPids = lsofResult.stdout
       .split("\n")
       .map((line) => Number.parseInt(line.trim(), 10))
       .filter((pid) => Number.isInteger(pid) && pid > 0);
-    if (listenerPids.length === 0) return false;
-    const listenerPgids = await Promise.all(
-      listenerPids.map(async (pid) => {
-        try {
-          const { stdout } = await execFileAsync("ps", [
-            "-p",
-            String(pid),
-            "-o",
-            "pgid=",
-          ]);
-          const value = Number.parseInt(stdout.trim(), 10);
-          return Number.isInteger(value) && value > 0 ? value : undefined;
-        } catch {
-          return undefined;
-        }
-      }),
-    );
+    if (listenerPids.length === 0) return false; // 无监听者（退出码 1 + 空输出）
+    const listenerPgids: (number | undefined)[] = [];
+    for (const pid of listenerPids) {
+      const psResult = await runObserver("ps", ["-p", String(pid), "-o", "pgid="]);
+      if (psResult.kind === "failed" && !toolExecutionUsable(psResult.code)) {
+        return undefined;
+      }
+      const value = Number.parseInt(psResult.stdout.trim(), 10);
+      listenerPgids.push(Number.isInteger(value) && value > 0 ? value : undefined);
+    }
     if (listenerPgids.some((value) => value === undefined)) return undefined;
     return listenerPgids.some((value) => value === pgid);
   };
 
   // ---- 统一清理核心（I4/I5）-------------------------------------------
-  const stopSignalToGroup = (
+  /**
+   * 复用安全的组信号发送。直接 kill(-pgid) 在迟到恢复（recover()）场景
+   * 下有风险：PGID 是可复用编号，组销毁后同号组可能属于无关进程。发送
+   * 前先证明“该组仍有本实例的已知成员”：master 仍被观测为 alive（其
+   * cmdline 绑定 configDir，无法与无关进程混淆），或组枚举到 nginx
+   * master/worker 成员。两者都无法确认时不发信号（进入 UNKNOWN 失败
+   * 路径），绝不向可能复用的编号盲目发送。
+   */
+  const safeGroupSignal = async (
     pgid: number,
     sig: NodeJS.Signals,
     failures: string[],
-  ): void => {
+  ): Promise<void> => {
+    const master = await observeMaster();
+    const members = await enumerateGroup(pgid);
+    if (master === "exited" && members !== undefined && members.length === 0) {
+      // 组已被可靠证明不存在：无需发信号。
+      return;
+    }
+    if (master === "unknown" || members === undefined) {
+      failures.push(
+        `could not confirm ownership of process group ${pgid} before sending ${sig}; refusing to signal a possibly reused id (${identity()})`,
+      );
+      return;
+    }
     try {
-      // 对整个进程组发信号：覆盖 master、worker、重建 worker 与孤儿。
+      // master alive（cmdline 绑定本实例）或组内仍有 nginx 成员：
+      // 组仍属于本实例，可安全地对整组发信号（覆盖 worker 与孤儿）。
       process.kill(-pgid, sig);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
       if (code === "ESRCH") {
-        // ESRCH：进程组已不存在——所有成员都已退出，这不是失败。
+        // ESRCH：发送瞬间组已销毁——所有成员都已退出，这不是失败。
         return;
       }
       failures.push(
@@ -422,7 +758,7 @@ export const serveWithNginx = async (
     // TERM 阶段的超时只意味着“需要升级”，不构成最终失败；最终成败由
     // KILL 阶段与最终确认决定（I5：升级路径是正常生命周期的一部分）。
     const termPhase: string[] = [];
-    stopSignalToGroup(pgid, "SIGTERM", termPhase);
+    await safeGroupSignal(pgid, "SIGTERM", termPhase);
     await waitForGroupExit(pgid, termPhase);
     {
       // 组内仍有成员或观测无法确认：升级 KILL 并有界等待。
@@ -432,7 +768,7 @@ export const serveWithNginx = async (
         members.length > 0 ||
         (await observeMaster()) === "alive";
       if (needsKill) {
-        stopSignalToGroup(pgid, "SIGKILL", failures);
+        await safeGroupSignal(pgid, "SIGKILL", failures);
         await waitForGroupExit(pgid, failures);
       }
     }
@@ -454,7 +790,11 @@ export const serveWithNginx = async (
         `workers still alive after stop signals: ${membersFinal.join(",")} (${identity()})`,
       );
     }
-    const portHeld = await portHeldByInstance(pgid);
+    // 端口证明链：进程组状态本身是证据；组 UNKNOWN 时 lsof 缺失不得放行。
+    const portHeld = await portHeldByInstance(pgid, {
+      master: masterFinal,
+      members: membersFinal,
+    });
     if (portHeld === undefined) {
       failures.push(
         `could not confirm ownership of listen port ${listenPort} (${identity()})`,
@@ -488,13 +828,36 @@ export const serveWithNginx = async (
     handlingSetupFailure = true;
     lifecycleState = "cleaning";
     const setupErrorTyped = setupError as Error;
+    // 资源清理能力从创建时刻起始终可达：即使清理失败，调用方也能通过
+    // 错误对象拿到 recover() 完成精确恢复（不解析字符串、不扫描目录）。
+    const resource: NginxResourceHandle = {
+      configDir,
+      listenPort,
+      instancePgid: child?.pid ?? -1,
+      masterPid: child?.pid,
+      recover: async () => {
+        if (lifecycleState === "cleaned") return;
+        removeConfigDir = realRemove;
+        lifecycleState = "cleaning";
+        try {
+          cleanupPromise = runCleanup("recover");
+          await cleanupPromise;
+          lifecycleState = "cleaned";
+        } catch (error) {
+          lifecycleState = "cleanup-failed";
+          throw error;
+        }
+      },
+    };
     try {
       await runCleanup("setup");
     } catch (cleanupError) {
       lifecycleState = "cleanup-failed";
-      throw new AggregateError(
-        [setupErrorTyped, cleanupError as Error],
+      throw new NginxSetupError(
         "nginx setup failed and process cleanup failed",
+        resource,
+        setupErrorTyped,
+        cleanupError as Error,
       );
     }
     throw setupErrorTyped;

@@ -10,6 +10,7 @@ import {
   ensureNginxRuntime,
   findFreePort,
   listDevhotNginxPids,
+  NginxSetupError,
   serveWithNginx,
   type NginxServer,
 } from "../support/nginx-runtime";
@@ -920,6 +921,55 @@ describe("pinned nginx runtime process lifecycle", () => {
   // =========================================================================
 
   it(
+    "fails cleanup when combined observation failure hides a stopped master",
+    { timeout: 60_000 },
+    async () => {
+      // 组合观测失效反例（P1）：master 被 SIGSTOP（无法处理 TERM）；
+      // master 观测以异常退出码失败；lsof 同时不可用。清理必须失败，
+      // 不得把 UNKNOWN 折叠为 EXITED 而删除仍在运行实例的目录。
+      const instance = await startInstance({
+        masterObservationExitCode: 2,
+        lsofExitCode: 127,
+      });
+      process.kill(instance.masterPid, "SIGSTOP");
+      try {
+        await expect(instance.stop()).rejects.toThrow(
+          /could not confirm|refusing to signal|could not enumerate/,
+        );
+        expect(instance.state).toBe("cleanup-failed");
+        // 目录保留供诊断（不得删除仍在运行实例的配置目录）。
+        await expect(stat(instance.configDir)).resolves.toBeTruthy();
+        // 独立探针：master 仍以停止态存活（真实 ps，不经被测实现）。
+        const { stdout } = await execFileAsync("ps", [
+          "-p",
+          String(instance.masterPid),
+          "-o",
+          "stat=,command=",
+        ]);
+        expect(stdout.trim().startsWith("T"), stdout.trim()).toBe(true);
+        expect(stdout).toContain("nginx");
+      } finally {
+        // 只清理本测试自己的精确进程组与目录。
+        try {
+          process.kill(instance.masterPid, "SIGCONT");
+        } catch {
+          // 已退出。
+        }
+        try {
+          process.kill(-instance.instancePgid, "SIGKILL");
+        } catch {
+          // 组已不存在。
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+        await rm(instance.configDir, { recursive: true, force: true });
+      }
+      // 独立确认最终无残留。
+      const members = await independentGroupMembers(instance.instancePgid);
+      expect(members).toEqual([]);
+    },
+  );
+
+  it(
     "coexists with an unrelated pre-existing nginx service",
     { timeout: 120_000 },
     async () => {
@@ -1047,12 +1097,13 @@ describe("pinned nginx runtime process lifecycle", () => {
   );
 
   it(
-    "preserves both startup and cleanup errors when both fail",
+    "preserves both startup and cleanup errors when both fail and keeps recovery reachable",
     { timeout: 60_000 },
     async () => {
       // 启动失败（readiness 失败：端口被无关占位服务占用）+ 清理失败
-      //（removeConfigDir 注入）：两类错误都必须保留在 AggregateError 中；
-      // 且即使启动失败拿不到正常实例句柄，清理责任也不丢失。
+      //（removeConfigDir 注入）：两类错误都必须保留；且启动失败拿不到
+      // 正常实例句柄时，调用方仍通过结构化错误对象持有清理责任与
+      // 受控恢复入口——不解析错误字符串、不扫描目录、不全局 kill。
       const { createServer } = await import("node:http");
       const blocker = createServer((_request, response) => {
         response.writeHead(200, { "content-type": "text/plain" });
@@ -1062,7 +1113,7 @@ describe("pinned nginx runtime process lifecycle", () => {
         blocker.listen(0, "127.0.0.1", () => resolvePromise()),
       );
       const blockedPort = (blocker.address() as { port: number }).port;
-      const snapshot = await nginxSnapshot();
+      let removeShouldFail = true;
       let thrown: unknown;
       try {
         thrown = await serveWithNginx(
@@ -1072,8 +1123,11 @@ describe("pinned nginx runtime process lifecycle", () => {
           projectConf.securityHeadersPath,
           blockedPort,
           {
-            removeConfigDir: async () => {
-              throw new Error("EACCES: simulated remove failure");
+            removeConfigDir: async (path) => {
+              if (removeShouldFail) {
+                throw new Error("EACCES: simulated remove failure");
+              }
+              await rm(path, { recursive: true });
             },
           },
         ).then(
@@ -1088,9 +1142,13 @@ describe("pinned nginx runtime process lifecycle", () => {
           blocker.close(() => resolvePromise()),
         );
       }
-      expect(thrown).toBeInstanceOf(AggregateError);
-      const aggregate = thrown as AggregateError;
-      const messages = aggregate.errors.map((error) => (error as Error).message);
+      // 结构化启动错误模型：错误对象携带资源身份与受控恢复能力。
+      expect(thrown).toBeInstanceOf(NginxSetupError);
+      const setupFailure = thrown as NginxSetupError;
+      const messages = [
+        setupFailure.setupError.message,
+        setupFailure.cleanupError?.message ?? "",
+      ];
       expect(
         messages.some((message) =>
           /did not become reachable|exited before readiness|failed to verify/.test(
@@ -1103,12 +1161,17 @@ describe("pinned nginx runtime process lifecycle", () => {
         messages.some((message) => /failed to remove|cleanup failed/.test(message)),
         `missing cleanup error in ${JSON.stringify(messages)}`,
       ).toBe(true);
-      // 探针独立兜底：清理注入失败留下的目录（精确清理本次新增）。
-      const after = await listConfDirs();
-      const added = after.filter((dir) => !snapshot.dirs.includes(dir));
-      for (const dir of added) {
-        await rm(join(tmpdir(), dir), { recursive: true, force: true });
-      }
+      // 资源身份完整可用（无需解析字符串）。
+      expect(setupFailure.resource.configDir).toBeTruthy();
+      expect(setupFailure.resource.instancePgid).toBeGreaterThan(0);
+      expect(typeof setupFailure.resource.recover).toBe("function");
+      // 外部条件恢复后，通过结构化能力完成精确清理。
+      removeShouldFail = false;
+      await setupFailure.resource.recover();
+      // 独立确认：进程组无成员、目录已回收（端口由占位服务持有后已释放）。
+      const members = await independentGroupMembers(setupFailure.resource.instancePgid);
+      expect(members).toEqual([]);
+      await expect(stat(setupFailure.resource.configDir)).rejects.toThrow();
     },
   );
 });
