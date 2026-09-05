@@ -132,9 +132,12 @@ const verifyNginxVersionOutput = (
   return { ok: true, detail: "" };
 };
 
-// 同进程内并发准备缓存时收敛为同一次构建（进程间并发由锁文件 + marker
-// 门控保护：半安装状态不会被 verifyCachedRuntime 接受）。
-let runtimePreparePromise: Promise<string> | undefined;
+/**
+ * 仅用于合并“正在进行”的并发准备：settled（无论成败）后即清空，后续
+ * 每次独立调用都重新验证当前缓存（verifyCachedRuntime）。不做进程内
+ * 永久信任——缓存目录在进程生命周期内可能被外部替换。
+ */
+let runtimePrepareInFlight: Promise<string> | undefined;
 
 const exec = (command: string, args: readonly string[], cwd: string): Promise<void> =>
   new Promise((resolvePromise, rejectPromise) => {
@@ -190,44 +193,91 @@ const verifyCachedRuntime = async (): Promise<boolean> => {
 };
 
 /** 简单锁文件互斥：内容为持锁 PID；持锁进程不存在时视为陈旧可抢占。 */
-const acquireLock = async (lockPath: string): Promise<boolean> => {
+interface RuntimeLock {
+  readonly path: string;
+  readonly token: string;
+}
+
+/**
+ * 跨进程互斥锁：以 O_EXCL（"wx"）原子创建锁文件，同一时刻只有一个
+ * 获取者成功——不存在“检查后写入”的竞态窗口。锁内容为不可复用 token
+ *（pid + 随机数 + 时间戳），释放/抢占都以 token 匹配为前提，杜绝误删
+ * 其他持有者的新锁。
+ */
+const acquireLock = async (lockPath: string): Promise<RuntimeLock | undefined> => {
+  await mkdir(dirname(lockPath), { recursive: true });
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  const { open } = await import("node:fs/promises");
   try {
-    const content = await readFile(lockPath, "utf8");
-    const holder = Number.parseInt(content.trim(), 10);
-    if (Number.isInteger(holder) && holder !== process.pid) {
-      const holderAlive = await execCapture("ps", ["-p", String(holder)])
-        .then((result) => result.code === 0 && result.stdout.trim().length > 0)
-        .catch(() => false);
-      if (holderAlive) return false;
+    // 原子创建：EEXIST 即他人持有。
+    const handle = await open(lockPath, "wx");
+    try {
+      await handle.writeFile(`${token}\n`, "utf8");
+    } finally {
+      await handle.close();
     }
-  } catch {
-    // 无锁文件：可获取。
+    return { path: lockPath, token };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
-  await writeFile(lockPath, `${process.pid}\n`);
-  return true;
+  // 锁已存在：判断是否陈旧（持有进程不存活，或锁内容超过陈旧期限）。
+  let content = "";
+  try {
+    content = (await readFile(lockPath, "utf8")).trim();
+  } catch {
+    return undefined; // 恰好被释放：让调用方重试。
+  }
+  const holderPid = Number.parseInt((content.split("-")[0] ?? "").trim(), 10);
+  const holderAlive = Number.isInteger(holderPid)
+    ? await execCapture("ps", ["-p", String(holderPid)])
+        .then((result) => result.code === 0 && result.stdout.trim().length > 0)
+        .catch(() => false)
+    : false;
+  // 陈旧期限兜底：即使 PID 复用让陈旧锁“看起来活着”，超龄也可抢占。
+  const mtime = await stat(lockPath)
+    .then((info) => info.mtimeMs)
+    .catch(() => Number.POSITIVE_INFINITY);
+  const staleByAge = Date.now() - mtime > 15 * 60_000;
+  if (holderAlive && !staleByAge) return undefined;
+  // 抢占陈旧锁：rename 原子换名后以 O_EXCL 重新创建，token 匹配保证
+  // 不删除另一持有者已重建的新锁。
+  const takeoverPath = `${lockPath}.stale-${process.pid}-${Date.now()}`;
+  try {
+    await (await import("node:fs/promises")).rename(lockPath, takeoverPath);
+  } catch {
+    return undefined; // 并发抢占：让调用方重试。
+  }
+  await rm(takeoverPath, { force: true }).catch(() => {});
+  return acquireLock(lockPath);
 };
 
-const releaseLock = async (lockPath: string): Promise<void> => {
+/** 释放锁：token 匹配才删除（不会误删他人的新锁）。 */
+const releaseLock = async (lock: RuntimeLock): Promise<void> => {
   try {
-    const content = await readFile(lockPath, "utf8");
-    if (Number.parseInt(content.trim(), 10) === process.pid) {
-      await rm(lockPath, { force: true });
+    const content = (await readFile(lock.path, "utf8")).trim();
+    if (content === lock.token) {
+      await rm(lock.path, { force: true });
     }
   } catch {
     // 锁已不存在。
   }
 };
 
-// 安装固定运行时：缓存命中必须通过内容校验；marker 只在完整构建与全部
-// 验证成功后原子写入，半安装状态不会被接受。
+// 安装固定运行时：每次调用都先验证当前缓存内容；未命中时进行准备，
+// 期间并发的调用合并到同一次 in-flight 准备（settled 后引用清空）。
 export const ensureNginxRuntime = async (): Promise<string> => {
-  runtimePreparePromise ??= prepareNginxRuntime();
-  try {
-    return await runtimePreparePromise;
-  } catch (error) {
-    runtimePreparePromise = undefined;
-    throw error;
+  if (await verifyCachedRuntime()) {
+    return nginxBinary;
   }
+  if (runtimePrepareInFlight !== undefined) {
+    return runtimePrepareInFlight;
+  }
+  const prepared = prepareNginxRuntime().finally(() => {
+    // settled 后立即清空 in-flight 引用：后续调用重新验证缓存。
+    if (runtimePrepareInFlight === prepared) runtimePrepareInFlight = undefined;
+  });
+  runtimePrepareInFlight = prepared;
+  return prepared;
 };
 
 const prepareNginxRuntime = async (): Promise<string> => {
@@ -235,19 +285,22 @@ const prepareNginxRuntime = async (): Promise<string> => {
     return nginxBinary;
   }
   const lockPath = `${runtimeRoot}.lock`;
-  await mkdir(dirname(runtimeRoot), { recursive: true });
-  if (!(await acquireLock(lockPath))) {
-    // 其他进程正在构建：等待其完成（构建者异常退出且缓存未就绪时接管）。
-    for (let attempt = 0; attempt < 600; attempt += 1) {
-      await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
-      if (await verifyCachedRuntime()) return nginxBinary;
-      if (!(await exists(lockPath))) break;
-    }
+  let lock: RuntimeLock | undefined;
+  // 有界抢锁循环：他人持锁时等待其完成；锁释放/陈旧后重试原子获取。
+  for (let attempt = 0; attempt < 600 && lock === undefined; attempt += 1) {
+    lock = await acquireLock(lockPath);
+    if (lock !== undefined) break;
+    // 等待期间持续复查：前一个构建者可能已完成（此时直接复用缓存）。
     if (await verifyCachedRuntime()) return nginxBinary;
-    await releaseLock(lockPath);
-    if (!(await acquireLock(lockPath))) {
-      throw new Error("pinned nginx runtime cache is locked by another process");
-    }
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+  }
+  if (lock === undefined) {
+    throw new Error("pinned nginx runtime cache is locked by another process");
+  }
+  // 获得锁后再次验证：前一个构建者可能在等待期间完成，避免重复重建。
+  if (await verifyCachedRuntime()) {
+    await releaseLock(lock);
+    return nginxBinary;
   }
   try {
     // 当前缓存目录与配方不符（可能为伪内容、半安装或旧配方）：只处理
@@ -319,7 +372,7 @@ const prepareNginxRuntime = async (): Promise<string> => {
     await rename(markerTemp, installMarkerPath);
     return nginxBinary;
   } finally {
-    await releaseLock(lockPath);
+    await releaseLock(lock);
   }
 };
 
@@ -445,15 +498,19 @@ export interface ServeWithNginxOptions {
   /** 令组枚举的 ps 查询抛错（清理期观测失效 → 清理失败而非误报成功）。 */
   readonly failGroupEnumeration?: boolean;
   /**
-   * 测试注入：模拟 master 观测的 ps 以异常状态码失败（如 2、空 stdout）。
-   * 只有可识别的 0/1/2 退出码可解读输出；其他状态码一律 UNKNOWN。
+   * 测试注入：模拟 master 的 ps -p 观测以指定退出码/stderr 失败。
+   * 按 ps -p 契约分类：仅“退出码 1 + 空 stdout + 空 stderr”是 target
+   * -absent；携带 stderr 的失败一律 UNKNOWN。
    */
   readonly masterObservationExitCode?: number;
+  readonly masterObservationStderr?: string;
   /**
-   * 测试注入：模拟 lsof 以 127（命令不存在）失败。用于组合观测失效
-   * 回归：进程组 UNKNOWN + lsof 不可用不得放行清理。
+   * 测试注入：模拟 lsof 以指定退出码/stderr 失败。仅“退出码 1 + 空
+   * stderr”是无匹配监听者；携带 stderr（如 "observer denied"）一律
+   * UNKNOWN，不得放行清理。
    */
   readonly lsofExitCode?: number;
+  readonly lsofStderr?: string;
 }
 
 const STOP_TIMEOUT_MS = 10_000;
@@ -550,15 +607,43 @@ export const serveWithNginx = async (
     );
 
   /**
-   * 工具可执行性判定：ENOENT/EACCES/EPERM（spawn 层失败，code 为字符串）
-   * 与异常退出码（127 命令不存在、126 不可执行、2 用法错误、其他）一律
-   * 不可信。只有 0（成功）与 1（BSD ps/lsof 惯用的“查无目标”退出码）
-   * 的输出可以解读；2 与其他状态码无法区分“目标不存在”与“工具自身
-   * 异常”，一律 UNKNOWN。
+  /**
+   * 按命令分别定义“成功 / 目标不存在 / 观测失败”语义。不同命令的退出码
+   * 没有统一含义，不做全局解释：
+   * - ps -p PID：退出码 0 成功；退出码 1 且 stdout 为空且 stderr 为空
+   *   才是“查无此进程”（BSD/Linux 一致契约）。非空 stderr、其他退出码、
+   *   spawn 层失败（ENOENT/EACCES/EPERM，code 为字符串）一律 UNKNOWN。
+   * - ps -eo：全量枚举，退出码必须为 0；任何非零退出（含 1）都是
+   *   UNKNOWN，绝不解释为“进程组为空”。
+   * - lsof -t：退出码 0 成功；退出码 1 且 stderr 为空才是“无匹配监听者”；
+   *   非空 stderr / 其他退出码一律 UNKNOWN。
    */
-  const toolExecutionUsable = (code: number | string): boolean => {
-    if (typeof code !== "number") return false;
-    return code === 0 || code === 1;
+  type ObserverOutcome =
+    | { readonly kind: "ok"; readonly stdout: string }
+    | { readonly kind: "target-absent" }
+    | { readonly kind: "unknown"; readonly reason: string };
+
+  const classifyObserver = (
+    command: "ps -p" | "ps -eo" | "lsof",
+    result: Awaited<ReturnType<typeof runObserver>>,
+  ): ObserverOutcome => {
+    if (result.kind === "ok") return { kind: "ok", stdout: result.stdout };
+    const { code, stdout, stderr } = result;
+    const stderrQuiet = stderr.trim().length === 0;
+    const detail = `code=${String(code)} stderr=${JSON.stringify(stderr.trim().slice(0, 60))}`;
+    if (command === "ps -eo") {
+      // 全量枚举没有“目标不存在”退出语义：任何非零退出都是观测失败。
+      return { kind: "unknown", reason: `ps -eo failed (${detail})` };
+    }
+    if (command === "ps -p") {
+      if (code === 1 && stdout.trim().length === 0 && stderrQuiet) {
+        return { kind: "target-absent" };
+      }
+      return { kind: "unknown", reason: `ps -p failed (${detail})` };
+    }
+    // lsof -t：退出码 1 + 空 stderr = 无匹配监听者。
+    if (code === 1 && stderrQuiet) return { kind: "target-absent" };
+    return { kind: "unknown", reason: `lsof failed (${detail})` };
   };
 
   /**
@@ -566,33 +651,39 @@ export const serveWithNginx = async (
    * 这里，不存在平行语义）。
    */
   const observePid = async (pid: number): Promise<ProcessObservation> => {
-    if (
-      options.masterObservationExitCode !== undefined &&
-      pid === child?.pid &&
-      !toolExecutionUsable(options.masterObservationExitCode)
-    ) {
-      // 注入的异常退出码：不可解读 → UNKNOWN（绝不折叠为 EXITED）。
-      return "unknown";
+    if (options.masterObservationExitCode !== undefined && pid === child?.pid) {
+      // 注入的观测结果：按 ps -p 契约分类，只接受契约允许的语义。
+      const injected = classifyObserver("ps -p", {
+        kind: "failed",
+        code: options.masterObservationExitCode,
+        stdout: "",
+        stderr: options.masterObservationStderr ?? "",
+      });
+      if (injected.kind === "target-absent") return "exited";
+      if (injected.kind === "unknown") return "unknown";
     }
-    const result = await runObserver("ps", ["-p", String(pid), "-o", "stat="]);
-    if (result.kind === "failed" && !toolExecutionUsable(result.code)) {
-      return "unknown";
-    }
-    const state = result.stdout.trim();
-    if (state.length === 0) return "exited"; // 退出码 1 + 空输出 = 查无此进程
+    const outcome = classifyObserver(
+      "ps -p",
+      await runObserver("ps", ["-p", String(pid), "-o", "stat="]),
+    );
+    if (outcome.kind === "unknown") return "unknown";
+    if (outcome.kind === "target-absent") return "exited";
+    const state = outcome.stdout.trim();
+    if (state.length === 0) return "exited";
     if (state.startsWith("Z")) return "exited"; // 僵尸不算存活
     return "alive";
   };
 
-  /** 进程组存活成员枚举（排除僵尸与 master 自身）；ps 无法执行 → undefined。 */
+  /** 进程组存活成员枚举（排除僵尸与 master 自身）；ps 任何非零退出 → undefined。 */
   const enumerateGroup = async (pgid: number): Promise<readonly number[] | undefined> => {
     if (options.failGroupEnumeration) return undefined;
-    const result = await runObserver("ps", ["-eo", "pid,pgid,stat,command"]);
-    if (result.kind === "failed" && !toolExecutionUsable(result.code)) {
-      return undefined;
-    }
+    const outcome = classifyObserver(
+      "ps -eo",
+      await runObserver("ps", ["-eo", "pid,pgid,stat,command"]),
+    );
+    if (outcome.kind !== "ok") return undefined;
     const pids: number[] = [];
-    for (const line of result.stdout.split("\n")) {
+    for (const line of outcome.stdout.split("\n")) {
       const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
       if (!match) continue;
       const pid = Number(match[1]);
@@ -623,11 +714,13 @@ export const serveWithNginx = async (
     if (liveness !== "alive") return liveness;
     // PID 存活后，cmdline 仍须属于本实例（创建语义 + pid 文件双重锚定），
     // 防止 PID 复用后被误认为本实例 master。
-    const result = await runObserver("ps", ["-p", String(child.pid), "-o", "command="]);
-    if (result.kind === "failed" && !toolExecutionUsable(result.code)) {
-      return "unknown";
-    }
-    return result.stdout.includes(configDir) ? "alive" : "exited";
+    const outcome = classifyObserver(
+      "ps -p",
+      await runObserver("ps", ["-p", String(child.pid), "-o", "command="]),
+    );
+    if (outcome.kind === "unknown") return "unknown";
+    if (outcome.kind === "target-absent") return "exited";
+    return outcome.stdout.includes(configDir) ? "alive" : "exited";
   };
 
   /**
@@ -651,32 +744,38 @@ export const serveWithNginx = async (
     if (groupReliablyGone) return false;
 
     // 进程组状态未知或有存活成员：必须用 lsof 确认监听者归属。
+    let lsofOutcome: ObserverOutcome;
     if (options.lsofExitCode !== undefined) {
-      if (!toolExecutionUsable(options.lsofExitCode)) {
-        return undefined; // lsof 不可用（如 127）：UNKNOWN，不得放行
-      }
+      lsofOutcome = classifyObserver("lsof", {
+        kind: "failed",
+        code: options.lsofExitCode,
+        stdout: "",
+        stderr: options.lsofStderr ?? "",
+      });
+    } else {
+      lsofOutcome = classifyObserver(
+        "lsof",
+        await runObserver("lsof", ["-nP", `-iTCP:${listenPort}`, "-sTCP:LISTEN", "-t"]),
+      );
     }
-    const lsofResult = await runObserver("lsof", [
-      "-nP",
-      `-iTCP:${listenPort}`,
-      "-sTCP:LISTEN",
-      "-t",
-    ]);
-    if (lsofResult.kind === "failed" && !toolExecutionUsable(lsofResult.code)) {
-      return undefined; // 工具不可用：UNKNOWN，不得放行
-    }
-    const listenerPids = lsofResult.stdout
-      .split("\n")
-      .map((line) => Number.parseInt(line.trim(), 10))
-      .filter((pid) => Number.isInteger(pid) && pid > 0);
-    if (listenerPids.length === 0) return false; // 无监听者（退出码 1 + 空输出）
+    if (lsofOutcome.kind === "unknown") return undefined;
+    const listenerPids =
+      lsofOutcome.kind === "ok"
+        ? lsofOutcome.stdout
+            .split("\n")
+            .map((line) => Number.parseInt(line.trim(), 10))
+            .filter((pid) => Number.isInteger(pid) && pid > 0)
+        : []; // target-absent：无监听者。
+    if (listenerPids.length === 0) return false;
     const listenerPgids: (number | undefined)[] = [];
     for (const pid of listenerPids) {
-      const psResult = await runObserver("ps", ["-p", String(pid), "-o", "pgid="]);
-      if (psResult.kind === "failed" && !toolExecutionUsable(psResult.code)) {
-        return undefined;
-      }
-      const value = Number.parseInt(psResult.stdout.trim(), 10);
+      const psOutcome = classifyObserver(
+        "ps -p",
+        await runObserver("ps", ["-p", String(pid), "-o", "pgid="]),
+      );
+      if (psOutcome.kind === "unknown") return undefined;
+      if (psOutcome.kind === "target-absent") return undefined; // 监听者瞬间消失：无法确认
+      const value = Number.parseInt(psOutcome.stdout.trim(), 10);
       listenerPgids.push(Number.isInteger(value) && value > 0 ? value : undefined);
     }
     if (listenerPgids.some((value) => value === undefined)) return undefined;

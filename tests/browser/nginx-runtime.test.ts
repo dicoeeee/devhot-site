@@ -921,6 +921,58 @@ describe("pinned nginx runtime process lifecycle", () => {
   // =========================================================================
 
   it(
+    "fails cleanup when exit-1 observations carry stderr (denied, not absent)",
+    { timeout: 60_000 },
+    async () => {
+      // 退出码 1 携带 stderr 的观测失败：不是“目标不存在”。ps -p/lsof
+      // 的退出码 1 只有在 stdout/stderr 均为空时才是契约意义上的“查无
+      // 目标”；携带 stderr（如 "observer denied"）一律 UNKNOWN。master
+      // 被 SIGSTOP 时清理必须失败，不得删除目录。
+      const instance = await startInstance({
+        masterObservationExitCode: 1,
+        masterObservationStderr: "observer denied",
+        lsofExitCode: 1,
+        lsofStderr: "observer denied",
+      });
+      process.kill(instance.masterPid, "SIGSTOP");
+      try {
+        await expect(instance.stop()).rejects.toThrow(
+          /could not confirm|refusing to signal|could not enumerate/,
+        );
+        expect(instance.state).toBe("cleanup-failed");
+        await expect(stat(instance.configDir)).resolves.toBeTruthy();
+        // 独立探针：master 与 worker 仍可定位（真实 ps，不经被测实现）。
+        const { stdout } = await execFileAsync("ps", [
+          "-p",
+          String(instance.masterPid),
+          "-o",
+          "stat=,command=",
+        ]);
+        expect(stdout.trim().startsWith("T"), stdout.trim()).toBe(true);
+        expect(stdout).toContain("nginx");
+        const members = await independentGroupMembers(instance.instancePgid);
+        expect(members.length, "workers must still be locatable").toBeGreaterThan(0);
+      } finally {
+        // 只清理本测试自己的精确进程组与目录。
+        try {
+          process.kill(instance.masterPid, "SIGCONT");
+        } catch {
+          // 已退出。
+        }
+        try {
+          process.kill(-instance.instancePgid, "SIGKILL");
+        } catch {
+          // 组已不存在。
+        }
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+        await rm(instance.configDir, { recursive: true, force: true });
+      }
+      const members = await independentGroupMembers(instance.instancePgid);
+      expect(members).toEqual([]);
+    },
+  );
+
+  it(
     "fails cleanup when combined observation failure hides a stopped master",
     { timeout: 60_000 },
     async () => {

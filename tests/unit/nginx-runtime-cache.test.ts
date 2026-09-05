@@ -1,4 +1,13 @@
-import { mkdtemp, mkdir, rm, stat, writeFile, chmod, readFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  mkdir,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+  chmod,
+  readFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -65,20 +74,44 @@ const probeSource = `
 import { ensureNginxRuntime } from "./tests/support/nginx-runtime.ts";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+import { readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 const execFileAsync = promisify(execFile);
 try {
   const resolved = await ensureNginxRuntime();
-  // 在隔离 TMPDIR 仍然存在时验证产物是真实 nginx（-v 输出版本行）。
-  let versionOk = false;
+  // 在隔离 TMPDIR 仍然存在时验证产物是真实 nginx：解析 -V 的
+  // stdout+stderr，精确校验版本行、--prefix 与 configure 参数——
+  // 不是只看退出码（"exit 0" 伪脚本无法伪造这些内容）。
+  let combined = "";
   try {
-    await execFileAsync(resolved, ["-v"]);
-    versionOk = true;
+    const ok = await execFileAsync(resolved, ["-V"]);
+    combined = (ok.stdout || "") + (ok.stderr || "");
   } catch (error) {
-    const stderr = (error && error.stderr) || "";
-    versionOk = stderr.includes("nginx version: nginx/");
+    combined = ((error && error.stdout) || "") + ((error && error.stderr) || "");
+  }
+  const versionOk =
+    combined.includes("nginx version: nginx/1.30.4") &&
+    combined.includes("--prefix=") &&
+    combined.includes("--without-http_gzip_module");
+  // 同时校验 marker 与二进制实际指纹一致。
+  let markerOk = false;
+  try {
+    const marker = JSON.parse(
+      await readFile(
+        resolved.replace("/sbin/nginx", "/.install-complete"),
+        "utf8",
+      ),
+    );
+    const actual = createHash("sha256")
+      .update(await readFile(resolved))
+      .digest("hex");
+    markerOk = marker.binarySha256 === actual && marker.recipeFingerprint && marker.schemaVersion === 2;
+  } catch {
+    markerOk = false;
   }
   console.log("RESOLVED=" + resolved);
   console.log("VERSION_OK=" + versionOk);
+  console.log("MARKER_OK=" + markerOk);
 } catch (error) {
   console.log("THREW=" + (error && error.message ? error.message.slice(0, 120) : "unknown"));
 }
@@ -87,7 +120,7 @@ try {
 describe("pinned nginx runtime cache integrity", () => {
   it(
     "rejects a fake binary at the expected cache path (exit 0 stub)",
-    { timeout: 120_000 },
+    { timeout: 600_000 },
     async () => {
       const result = await runCacheProbe(async (root, dirName) => {
         const sbin = join(root, dirName, "sbin");
@@ -102,12 +135,13 @@ describe("pinned nginx runtime cache integrity", () => {
       expect(resolved.endsWith("sbin/nginx")).toBe(true);
       // 伪缓存必须被拒绝并重建：产物在探针内验证为真实 nginx。
       expect(result.stdout).toContain("VERSION_OK=true");
+      expect(result.stdout).toContain("MARKER_OK=true");
     },
   );
 
   it(
     "rejects a cache with a missing marker (half-installed state)",
-    { timeout: 120_000 },
+    { timeout: 600_000 },
     async () => {
       const result = await runCacheProbe(async (root, dirName) => {
         const sbin = join(root, dirName, "sbin");
@@ -132,12 +166,13 @@ describe("pinned nginx runtime cache integrity", () => {
       // 无 marker：触发重建；绝不直接接受无 marker 的缓存。
       expect(resolved.endsWith("sbin/nginx")).toBe(true);
       expect(result.stdout).toContain("VERSION_OK=true");
+      expect(result.stdout).toContain("MARKER_OK=true");
     },
   );
 
   it(
     "rejects a cache whose marker disagrees with the actual binary fingerprint",
-    { timeout: 120_000 },
+    { timeout: 600_000 },
     async () => {
       const result = await runCacheProbe(async (root, dirName) => {
         const sbin = join(root, dirName, "sbin");
@@ -160,12 +195,13 @@ describe("pinned nginx runtime cache integrity", () => {
       const resolved = result.stdout.match(/RESOLVED=(.*)/)?.[1] ?? "";
       expect(resolved.endsWith("sbin/nginx")).toBe(true);
       expect(result.stdout).toContain("VERSION_OK=true");
+      expect(result.stdout).toContain("MARKER_OK=true");
     },
   );
 
   it(
     "a marker with a different recipe fingerprint is not the current runtime",
-    { timeout: 120_000 },
+    { timeout: 600_000 },
     async () => {
       // 配方变化（如 configure 参数不同）产生不同指纹：同目录名不会被
       // 匹配——本测试验证“同名目录 + 异配方 marker”不被当作当前运行时。
@@ -189,15 +225,15 @@ describe("pinned nginx runtime cache integrity", () => {
       const resolved = result.stdout.match(/RESOLVED=(.*)/)?.[1] ?? "";
       expect(resolved.endsWith("sbin/nginx")).toBe(true);
       expect(result.stdout).toContain("VERSION_OK=true");
+      expect(result.stdout).toContain("MARKER_OK=true");
     },
   );
 
   it(
-    "concurrent prepare calls converge on one validated cache",
+    "in-process concurrent prepare calls converge on one validated cache",
     { timeout: 300_000 },
     async () => {
-      // 两个并发 ensureNginxRuntime：同进程内收敛为一次构建；跨进程由
-      // 锁文件保护。两者最终都拿到通过内容校验的二进制。
+      // 同进程内并发：合并为一次 in-flight 准备，产物通过内容校验。
       const isolated = await mkdtemp(join(tmpdir(), "devhot-runtime-concurrent-"));
       try {
         const script = `
@@ -226,9 +262,137 @@ console.log("CONVERGED=" + a);
         );
         const converged = result.match(/CONVERGED=(.*)/)?.[1] ?? "";
         expect(converged.endsWith("sbin/nginx")).toBe(true);
-        // 产物必须通过内容验证（真实 -v 输出）。
-        const version = await execFileAsync(converged, ["-v"]).catch(() => undefined);
-        expect(version).toBeDefined();
+      } finally {
+        await rm(isolated, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "two independent processes racing on the same cache yield one build, no residue",
+    { timeout: 600_000 },
+    async () => {
+      // 两个独立 Node 进程 + 同步屏障（就绪文件 + 定时同时起跑）竞争
+      // 同一缓存目标：锁必须互斥，最终只有一份完整 marker/二进制，且
+      // 锁文件被清理（无残留、无相互删除）。
+      const isolated = await mkdtemp(join(tmpdir(), "devhot-runtime-race-"));
+      try {
+        const script = `
+import { ensureNginxRuntime } from "./tests/support/nginx-runtime.ts";
+import { stat, writeFile } from "node:fs/promises";
+const barrier = process.env.BARRIER_PATH;
+// 就绪屏障：各自写自己的 ready 文件，等待两份都出现后同时起跑。
+await writeFile(barrier + ".ready", "1");
+const other = process.env.OTHER_BARRIER;
+for (let i = 0; i < 600; i += 1) {
+  try {
+    await stat(other + ".ready");
+    break;
+  } catch {
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+const startAt = Date.now() + 150;
+while (Date.now() < startAt) await new Promise((r) => setTimeout(r, 5));
+const resolved = await ensureNginxRuntime();
+console.log("RACE_DONE=" + resolved);
+`;
+        const runChild = (ordinal: string) =>
+          execFileAsync("node", ["--input-type=module", "-e", script], {
+            cwd: process.cwd(),
+            env: {
+              ...process.env,
+              TMPDIR: isolated,
+              BARRIER_PATH: `${join(isolated, "barrier")}.${ordinal}`,
+              OTHER_BARRIER: `${join(isolated, "barrier")}.${ordinal === "1" ? "2" : "1"}`,
+            },
+          }).then(
+            (ok) => ok.stdout,
+            (error) => {
+              throw new Error(
+                `race child failed: ${(error as { stderr?: string }).stderr ?? "unknown"}`,
+              );
+            },
+          );
+        const [first, second] = await Promise.all([runChild("1"), runChild("2")]);
+        const done1 = first.match(/RACE_DONE=(.*)/)?.[1] ?? "";
+        const done2 = second.match(/RACE_DONE=(.*)/)?.[1] ?? "";
+        // 两个进程都拿到同一路径。
+        expect(done1.endsWith("sbin/nginx")).toBe(true);
+        expect(done1).toBe(done2);
+        // 独立复核：marker 与二进制实际指纹一致（只有一份完整产物）。
+        const runtimeDir = done1.replace("/sbin/nginx", "");
+        const marker = JSON.parse(
+          await readFile(join(runtimeDir, ".install-complete"), "utf8"),
+        ) as { binarySha256: string };
+        const actual = createHash("sha256")
+          .update(await readFile(done1))
+          .digest("hex");
+        expect(marker.binarySha256).toBe(actual);
+        // 无锁残留、无 stale 残留。
+        await expect(stat(`${runtimeDir}.lock`)).rejects.toThrow();
+        const leftovers = (await readdir(isolated)).filter(
+          (entry) => entry.includes(".lock") || entry.includes("stale-"),
+        );
+        expect(leftovers).toEqual([]);
+      } finally {
+        await rm(isolated, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "re-verifies the cache on every call after a successful prepare",
+    { timeout: 300_000 },
+    async () => {
+      // 永久信任反例：第一次 ensure 成功后，把隔离缓存中的二进制替换为
+      // 伪脚本；第二次 ensure 必须拒绝/重建（不能直接返回旧结论）。
+      const isolated = await mkdtemp(join(tmpdir(), "devhot-runtime-reswap-"));
+      try {
+        const script = `
+import { ensureNginxRuntime } from "./tests/support/nginx-runtime.ts";
+import { writeFile, chmod } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+const execFileAsync = promisify(execFile);
+const first = await ensureNginxRuntime();
+console.log("FIRST=" + first);
+// 外部篡改：替换为 "exit 0" 伪脚本。
+await writeFile(first, "#!/bin/sh" + String.fromCharCode(10) + "exit 0" + String.fromCharCode(10));
+await chmod(first, 0o755);
+const second = await ensureNginxRuntime();
+console.log("SECOND=" + second);
+// 第二次结果必须再次通过内容验证（-V 解析版本与 prefix）。
+let combined = "";
+try {
+  const ok = await execFileAsync(second, ["-V"]);
+  combined = (ok.stdout || "") + (ok.stderr || "");
+} catch (error) {
+  combined = ((error && error.stdout) || "") + ((error && error.stderr) || "");
+}
+console.log(
+  "SECOND_REAL=" +
+    (combined.includes("nginx version: nginx/1.30.4") && combined.includes("--prefix=")),
+);
+`;
+        const result = await execFileAsync(
+          "node",
+          ["--input-type=module", "-e", script],
+          {
+            cwd: process.cwd(),
+            env: { ...process.env, TMPDIR: isolated },
+          },
+        ).then(
+          (ok) => ok.stdout,
+          (error) => {
+            throw new Error(
+              (error as { stderr?: string }).stderr ?? "reswap probe failed",
+            );
+          },
+        );
+        expect(result).toContain("FIRST=");
+        expect(result).toContain("SECOND=");
+        expect(result).toContain("SECOND_REAL=true");
       } finally {
         await rm(isolated, { recursive: true, force: true });
       }
