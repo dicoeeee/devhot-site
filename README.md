@@ -24,12 +24,19 @@ root，生成按领域切换的编辑型首页、当前洞察详情与独立来�
 
 ```sh
 npm ci
+npx playwright install chromium firefox webkit
 npm run gate
 ```
 
 `npm run gate`
-依次执行输入验证、格式和严格类型检查、依赖方向检查、测试、完整静态构建、Manifest 白名单资源复制及
-`dist` 验证。任一步失败都会使门禁失败。
+依次执行输入验证、格式和严格类型检查、依赖方向检查、测试（含三引擎浏览器检查）、完整静态构建、Manifest 白名单资源复制、
+`dist` 验证及服务安全与缓存策略验证。任一步失败都会使门禁失败。
+
+浏览器检查使用锁定版本的 `@playwright/test`（Chromium 151.0.7922.34、Firefox 153.0、WebKit
+26.5）：Chromium 覆盖七类读者页面的完整主路径、键盘/鼠标/触摸等价交互、时间线返回恢复、失败重试与三种视口的无水平溢出；Firefox 与 WebKit 在桌面和手机视口执行核心smoke。构建目标固定为
+`chrome111 / edge111 / firefox114 / safari16.4`，不提供 legacy
+bundle。真实 Chrome、Edge 与 Safari 的人工验收清单见
+`docs/manual-browser-acceptance.md`；未执行的真实浏览器证据不冒充已通过。
 
 `npm run build` 复用同一输入与输出验证链，但不替代完整门禁。
 
@@ -76,13 +83,14 @@ Astro pages → dist/ → output verifier
 ## 固定构建运行时
 
 - Node.js：`24.19.0`，官方发布于 2026-08-03。
-- 官方构建镜像：`node:24.19.0-alpine3.24`。
+- 官方构建镜像：`node:24.19.0-bookworm`（Debian 12）。
 - OCI multi-platform digest：
-  `sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43`。
-- Docker Hub 在 2026-08-19 回读的支持架构：`linux/amd64`、`linux/arm64/v8`、
-  `linux/s390x`。
+  `sha256:4196d66a565c6f195728d9952f161f4adfe2ad753052a08b7ec7f1c5a6bda42b`。
+- 该 digest 于 2026-09-02 重新解析；支持 `linux/amd64`、`linux/arm64/v8`、
+  `linux/ppc64le`。镜像切换到 Debian 基底是因为 Playwright 官方不支持 Alpine，三引擎浏览器检查需要
+  `npx playwright install --with-deps` 的 apt 依赖链；Node 版本与门禁命令保持不变。
 
-`Dockerfile` 同时固定可读 tag 和 digest，并在镜像构建中执行 `npm ci` 与
+`Dockerfile` 同时固定可读 tag 和 digest，并在镜像构建中执行 `npm ci`、三引擎浏览器安装与
 `npm run gate`。GitHub Actions 使用同一精确 Node 版本和唯一门禁。
 
 Rolldown 1.2.5 先前缺失的 `darwin-x64` 与 `linux-arm64-gnu` optional
@@ -95,3 +103,27 @@ binding 已发布，`package-lock.json` 固定其完整版本、下载地址和�
 `site-input/assets/sha256/73bc08f1…110c89.png`
 是 Devhot 受控透明 CIMC 原始标志的逐字节副本，SHA-256 为
 `73bc08f1a558271ed021a4f51fcc4a07d2850deea7cb592282ae0f9d5a110c89`。构建只按原长宽比显示，不重绘、不改色、不裁切、不拉伸。
+
+## 发布产物与安全基线
+
+完整构建在 `dist/` 中额外输出：
+
+- `release.json`：版本元数据（publicationId、buildSha、generatedAt），按重验证缓存策略提供。
+- `maintenance/reminders.json`：脱敏维护状态 JSON；维护状态只输出机器可读 JSON，不生成日报、周报、报告索引或维护 HTML 读者页面。
+- `_publication.json`：路由清单与内容寻址资源摘要，`npm run verify:dist`
+  验证路由集合、站内链接、资源哈希、无内联可执行脚本、无内联样式、无事件处理属性、无 Service
+  Worker 注册和无第三方运行时请求。
+
+`deploy/nginx-serving.conf` 与 `deploy/security-headers.conf`
+固化静态服务的安全响应头与缓存策略：仅允许自身资源的CSP、`nosniff`、`no-referrer`、拒绝 framing 的兼容头、`Permissions-Policy`，HTTP 阶段不发送 HSTS；HTML 与版本元数据重验证，`/media/sha256/`
+与 `/_astro/` 内容寻址资源长期 `immutable` 缓存。
+
+由于 Nginx 的 `add_header`
+在 location 内声明后不再继承 server 层，每个缓存 location 都重复
+`include deploy/security-headers.conf`； `npm run verify:serving`
+逐条验证该不变量。`tests/browser/nginx-runtime.test.ts`
+进一步用真实固定版本 Nginx（1.30.4，tarball
+SHA-256 固定，源码构建）启动完整产物并以真实 HTTP 请求验证：HTML、`release.json`、`_publication.json`、维护 JSON、时间线片段、内容寻址资源与 404 响应的安全头、缓存指令、条件请求 304，以及全程无 HSTS、无 HTTPS 重定向。后续部署包（#82–#84）必须原样挂载这两个配置文件，不得在本文件之外改写安全头。
+
+CSP 中 `connect-src 'self'` 用于时间线的同源意图加载（ADR 0242）；与 ADR 0222 首版
+`connect-src 'none'` 的字面冲突由治理 Issue dicoeeee/devhot#98 跟踪修订。

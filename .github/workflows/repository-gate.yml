@@ -19,11 +19,12 @@ jobs:
   gate:
     name: npm run gate
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
     container:
-      image: node:24.19.0-alpine3.24@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
+      image: node:24.19.0-bookworm@sha256:4196d66a565c6f195728d9952f161f4adfe2ad753052a08b7ec7f1c5a6bda42b
     env:
       ASTRO_TELEMETRY_DISABLED: "1"
+      HOME: "/root"
     steps:
       - name: Check out the candidate
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -35,11 +36,16 @@ jobs:
       - name: Verify runtime version
         run: test "$(node --version)" = "v24.19.0"
 
-      - name: Install Bash and Git for repository fixtures
-        run: apk add --no-cache bash git
+      - name: Install Git and build toolchain for repository fixtures
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends git make gcc libc6-dev libssl-dev tar ca-certificates
 
       - name: Install locked dependencies
         run: npm ci
+
+      - name: Install pinned browser engines
+        run: npx playwright install --with-deps chromium firefox webkit
 
       - name: Validate pull request metadata
         if: github.event_name == 'pull_request'

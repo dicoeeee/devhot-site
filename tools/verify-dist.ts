@@ -3,7 +3,13 @@ import { readdir, readFile, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parse as parseScript, type Node as AcornNode } from "acorn";
+import { parse, type DefaultTreeAdapterMap } from "parse5";
+
 import { listSafeFiles } from "../src/infrastructure/list-safe-files";
+
+type Node = DefaultTreeAdapterMap["node"];
+type Element = DefaultTreeAdapterMap["element"];
 
 interface PublicationMetadata {
   readonly schemaVersion: 1;
@@ -17,8 +23,26 @@ interface PublicationMetadata {
   }[];
 }
 
+interface ReleaseMetadata {
+  readonly schemaVersion: 1;
+  readonly publicationId: string;
+  readonly buildSha: string;
+  readonly generatedAt: string;
+}
+
+interface MaintenanceReminders {
+  readonly schemaVersion: 1;
+  readonly reminders: readonly unknown[];
+}
+
 interface VerifyDistributionOptions {
   readonly distRoot: string;
+  /**
+   * #78 七页面发布候选验收：最终候选 dist 必须包含完整七类页面
+   * （领域首页、洞察、来源、主题总览、主题详情、标签详情、时间线）。
+   * 旧契约兼容测试（无时间线/标签的最小切片）仍可用默认值验证。
+   */
+  readonly requireSevenPageRelease?: boolean;
 }
 
 const sha256 = (value: Uint8Array): string =>
@@ -65,8 +89,332 @@ const parseMetadata = (value: unknown): PublicationMetadata => {
   return metadata as PublicationMetadata;
 };
 
+// —— 结构化 HTML 安全扫描（parse5 真实解析，不依赖可绕过的局部正则） ——
+
+const EVENT_HANDLER_ATTRIBUTE = /^on[a-z]+$/i;
+
+// WHATWG URL 风格输入预处理（https://url.spec.whatwg.org/#url-parsing）：
+// 1. 删除任意位置的 ASCII TAB（U+0009）、LF（U+000A）、CR（U+000D）；
+// 2. 删除首尾全部 C0 control（U+0000–U+001F）与 space（U+0020）。
+// 浏览器会把 "\u0000https://…"、"ht\ntps://…" 等解析为真实外部 URL，
+// 因此 scheme 判断必须在同一规范化之后进行。JS、HTML、CSS 的所有 URL
+// 检查共用本函数。
+export const normalizeUrlValue = (value: string): string =>
+  value
+    .replace(/[\u0009\u000A\u000D]/g, "")
+    .replace(/^[\u0000-\u0020]+/, "")
+    .replace(/[\u0000-\u0020]+$/, "");
+
+const isExternalReference = (value: string): boolean => isExternalScriptUrl(value);
+
+const walk = (node: Node, visit: (element: Element) => void): void => {
+  if ("tagName" in node) {
+    visit(node as Element);
+  }
+  if ("childNodes" in node) {
+    for (const child of (node as Element).childNodes ?? []) {
+      walk(child, visit);
+    }
+  }
+};
+
+const textOf = (element: Element): string =>
+  (element.childNodes ?? [])
+    .filter(
+      (child): child is DefaultTreeAdapterMap["textNode"] => child.nodeName === "#text",
+    )
+    .map((child) => child.value)
+    .join("")
+    .trim();
+
+export const scanHtmlSecurity = (html: string, path: string): void => {
+  const document = parse(html, { sourceCodeLocationInfo: false });
+
+  walk(document, (element) => {
+    const tag = element.tagName.toLowerCase();
+    const attributes = new Map(element.attrs.map((attr) => [attr.name, attr.value]));
+
+    for (const attr of element.attrs) {
+      if (EVENT_HANDLER_ATTRIBUTE.test(attr.name)) {
+        throw new Error(
+          `inline event handler attribute found in ${path}: ${tag} ${attr.name}`,
+        );
+      }
+    }
+
+    // 内联样式：style 属性与 <style> 块都不允许。
+    if (attributes.has("style")) {
+      throw new Error(`inline style attribute found in ${path}: <${tag} style=…>`);
+    }
+    if (tag === "style" && textOf(element).length > 0) {
+      throw new Error(`inline style block found in ${path}`);
+    }
+
+    // 内联可执行脚本：按 HTML 脚本类型规则判定——type 缺省或空串都是
+    // JavaScript；任何 JavaScript MIME 变体（text/javascript、
+    // application/javascript、text/ecmascript、application/ecmascript、
+    // text/jscript、javascript1.x 等）同样可执行。只有本站显式声明的
+    // 数据块类型白名单（application/json）不算可执行；其余未知类型一律
+    // 按可执行处理（保守），不得因“不在已知清单中”而默认放行。
+    if (tag === "script") {
+      const rawType = attributes.get("type");
+      const type = rawType?.toLowerCase().trim();
+      const isJavaScriptMime =
+        type !== undefined &&
+        (type.includes("javascript") || type.includes("ecmascript") || type === "module");
+      // 数据块白名单仅 application/json：import map 影响模块解析并受
+      // 脚本 CSP 约束（现有 CSP 不含 inline script），不得按普通 JSON
+      // 数据块免检；如未来确需支持须另行明确映射校验与 CSP 方案。
+      const isDeclaredDataBlock = type === "application/json";
+      const executable = !isDeclaredDataBlock;
+      if (executable) {
+        const src = attributes.get("src");
+        if (src !== undefined && isExternalReference(src)) {
+          throw new Error(
+            `external runtime dependency found in ${path}: <script src="${src}">`,
+          );
+        }
+        if (textOf(element).length > 0) {
+          throw new Error(`inline executable script found in ${path}`);
+        }
+        if (src === undefined || !src.startsWith("/")) {
+          throw new Error(`script without a same-origin src found in ${path}`);
+        }
+      }
+    }
+
+    // 第三方运行时资源：引用外部 URL 的加载型元素一律拒绝。
+    const runtimeReferenceAttribute: Record<string, string> = {
+      script: "src",
+      img: "src",
+      source: "src",
+      video: "src",
+      audio: "src",
+      track: "src",
+      embed: "src",
+      iframe: "src",
+      object: "data",
+      link: "href",
+      use: "href",
+    };
+    const referenceAttribute = runtimeReferenceAttribute[tag];
+    if (referenceAttribute) {
+      const value = attributes.get(referenceAttribute);
+      if (value !== undefined && isExternalReference(value)) {
+        throw new Error(
+          `external runtime dependency found in ${path}: <${tag} ${referenceAttribute}="${value}">`,
+        );
+      }
+      if (tag === "link") {
+        const rel = attributes.get("rel")?.toLowerCase() ?? "";
+        const preloadLike = rel
+          .split(/\s+/)
+          .some((token) =>
+            [
+              "preload",
+              "modulepreload",
+              "prefetch",
+              "preconnect",
+              "dns-prefetch",
+            ].includes(token),
+          );
+        if (preloadLike) {
+          const href = attributes.get("href");
+          if (href === undefined || isExternalReference(href) || !href.startsWith("/")) {
+            throw new Error(`non-same-origin preload link found in ${path}: ${rel}`);
+          }
+        }
+      }
+    }
+    // srcset 上的外部引用同样拒绝。
+    for (const attr of element.attrs) {
+      if (attr.name === "srcset" || attr.name === "imagesrcset") {
+        const candidates = attr.value
+          .split(",")
+          .map((part) => part.trim().split(/\s+/)[0] ?? "");
+        if (candidates.some((candidate) => isExternalReference(candidate))) {
+          throw new Error(
+            `external runtime dependency found in ${path}: ${tag} ${attr.name}`,
+          );
+        }
+      }
+    }
+  });
+};
+
+// 生成 JS 的第三方连接检查基于 AST（acorn）：
+// - StringLiteral、无插值模板字符串、含插值模板的每个 quasi 都按值检查；
+// - 检查前先 trim() 两端空白（URL parser 会忽略前导空白）；
+// - 拒绝大小写不敏感的 http://、https://、ws://、wss:// 与协议相对 // 第三方 URL；
+// - 站内相对 URL（如 /timeline/fragments/...）不受影响；
+// - Worker/SharedWorker 构造（Identifier、window/globalThis/self 成员形式、
+//   可静态确定的 computed property）一律拒绝，不论参数来源；
+// - 并保留 service worker 注册与内联事件处理属性的既有拒绝策略。
+// 按 URL 解析结果判断外部性：`https:example.invalid/x`、`https:/example.invalid/x`、
+// `\\example.invalid/x`、`/\example.invalid/x` 在浏览器 URL 解析下都是外部
+// 请求，仅匹配 `://` 或 `//` 前缀会漏报。仅对“看起来像引用”的值（已知
+// scheme 开头，或以正斜杠/反斜杠开头——浏览器把反斜杠当斜杠解析）走判定，
+// 避免把普通字符串（如时间 `T00:00:00Z`）误判成外部 host；
+// data:/blob: 属 CSP 允许的内联载荷，不算外部。
+const isExternalScriptUrl = (value: string): boolean => {
+  const normalized = normalizeUrlValue(value);
+  if (normalized === "") return false;
+  // WHATWG 浏览器解析中，反斜杠在特殊 scheme 下等价于正斜杠
+  // （\\example.invalid 与 //example.invalid 同为外部协议相对地址），
+  // 因此以反斜杠开头的值同样进入引用判定，不得被前缀筛选提前放行。
+  const looksLikeReference =
+    /^(?:https?|wss?|data|blob):/i.test(normalized) || /[/\\]/.test(normalized[0] ?? "");
+  if (!looksLikeReference) return false;
+  // 任何 http(s)/ws(s) scheme 形态（含 https:、https:/ 等变体）都指向外部
+  // 站点（本站运行时只允许同源相对路径）。
+  if (/^(?:https?|wss?):/i.test(normalized)) return true;
+  if (/^[/\\]{2}/.test(normalized)) return true;
+  if (/^(?:data|blob):/i.test(normalized)) return false;
+  try {
+    // 浏览器把反斜杠当作斜杠解析：先统一再判定 origin。
+    const parsed = new URL(normalized.replace(/\\/g, "/"), "http://devhot.invalid/");
+    return parsed.origin !== "http://devhot.invalid";
+  } catch {
+    return false;
+  }
+};
+
+// 模板字符串按前缀判定：任一 quasi（trim 后）以第三方 scheme 开头即拒绝，
+// 含 ${} 插值的模板无法静态证明其最终值，同样按前缀拒绝。
+const templateIsExternal = (node: AcornNode): string | undefined => {
+  const template = node as unknown as {
+    quasis?: { value: { cooked: string | null } }[];
+  };
+  for (const quasi of template.quasis ?? []) {
+    const cooked = quasi.value.cooked;
+    if (cooked !== null && isExternalScriptUrl(cooked)) return cooked;
+  }
+  return undefined;
+};
+
+// callee 的静态可读名称：Identifier（Worker）、全局成员（window.Worker、
+// globalThis.SharedWorker、self.Worker）与 computed 形式（window["Worker"]）。
+const WORKER_GLOBALS = new Set(["window", "globalThis", "self"]);
+const WORKER_CONSTRUCTORS = new Set(["Worker", "SharedWorker"]);
+
+const calleeConstructorName = (callee: AcornNode): string | undefined => {
+  const node = callee as unknown as {
+    type: string;
+    name?: string;
+    object?: { type: string; name?: string };
+    property?: { type: string; name?: string; value?: unknown };
+    computed?: boolean;
+  };
+  if (node.type === "Identifier") return node.name;
+  if (node.type === "MemberExpression") {
+    if (
+      node.object?.type === "Identifier" &&
+      WORKER_GLOBALS.has(node.object.name ?? "")
+    ) {
+      if (!node.computed && node.property?.type === "Identifier") {
+        return node.property.name;
+      }
+      if (node.computed && node.property?.type === "Literal") {
+        const value = (node.property as unknown as { value?: unknown }).value;
+        if (typeof value === "string") return value;
+      }
+    }
+  }
+  return undefined;
+};
+
+const scanScriptSecurity = (source: string, path: string): void => {
+  // 产物 JS 必须可解析：发行脚本可能是经典脚本或同源 ES module
+  //（静态 import/export 仅在 module 语法下合法）。先按经典脚本解析，
+  // 失败再按 module 解析；两种语法都不合法才视为不可解析。无论以哪种
+  // 语法解析成功，后续安全检查（外部 URL、Worker 构造等）都照常执行，
+  // 不因支持 module 而绕过 AST 扫描。
+  let program: AcornNode;
+  try {
+    program = parseScript(source, { ecmaVersion: "latest" });
+  } catch {
+    try {
+      program = parseScript(source, {
+        ecmaVersion: "latest",
+        sourceType: "module",
+      });
+    } catch {
+      // 产物 JS 必须可解析；解析失败本身即为门禁违规。
+      throw new Error(`distributed script is not parseable: ${path}`);
+    }
+  }
+
+  const visit = (node: AcornNode): void => {
+    const candidate = node as unknown as { type: string };
+    if (candidate.type === "Literal" || candidate.type === "TemplateLiteral") {
+      let offending: string | undefined;
+      if (candidate.type === "Literal") {
+        const value = (node as unknown as { value?: unknown }).value;
+        if (typeof value === "string" && isExternalScriptUrl(value)) offending = value;
+      } else {
+        offending = templateIsExternal(node);
+      }
+      if (offending !== undefined) {
+        throw new Error(`external runtime dependency found in ${path}: ${offending}`);
+      }
+    }
+    if (candidate.type === "NewExpression") {
+      const callee = (node as unknown as { callee?: AcornNode }).callee;
+      const constructorName = callee ? calleeConstructorName(callee) : undefined;
+      if (constructorName !== undefined && WORKER_CONSTRUCTORS.has(constructorName)) {
+        throw new Error(`worker constructor found in ${path}: ${constructorName}`);
+      }
+    }
+    for (const key of Object.keys(node)) {
+      if (key === "type" || key === "start" || key === "end") continue;
+      const child = (node as unknown as Record<string, unknown>)[key];
+      if (Array.isArray(child)) {
+        for (const item of child) {
+          if (item && typeof item === "object" && "type" in item) {
+            visit(item as AcornNode);
+          }
+        }
+      } else if (child && typeof child === "object" && "type" in child) {
+        visit(child as AcornNode);
+      }
+    }
+  };
+  visit(program);
+
+  // AST 覆盖不了的兜底：内联事件处理属性（字符串形态）与 service worker 注册。
+  if (/serviceWorker\s*\.\s*register\s*\(/i.test(source)) {
+    throw new Error(`service worker registration found in ${path}`);
+  }
+  if (/\bon[a-z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]+)/i.test(source)) {
+    throw new Error(`inline event handler attribute found in ${path}`);
+  }
+};
+
+const scanStyleSecurity = (source: string, path: string): void => {
+  // CSS 中的 URL 与 @import 同样按解析结果判断外部性（与 JS/HTML 一致）：
+  // 提取 url(...) 与 @import "..." 的候选值后走 isExternalScriptUrl。
+  const normalizedSource = normalizeUrlValue(source).replace(/[\t\n\r]/g, "");
+  const candidates: string[] = [];
+  for (const match of normalizedSource.matchAll(
+    /url\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi,
+  )) {
+    candidates.push(match[1] ?? match[2] ?? match[3] ?? "");
+  }
+  for (const match of normalizedSource.matchAll(
+    /@import\s+(?:url\s*\(\s*)?["']([^"']+)["']/gi,
+  )) {
+    candidates.push(match[1] ?? "");
+  }
+  for (const candidate of candidates) {
+    if (isExternalScriptUrl(candidate)) {
+      throw new Error(`external runtime dependency found in ${path}`);
+    }
+  }
+};
+
 export const verifyDistribution = async ({
   distRoot,
+  requireSevenPageRelease = false,
 }: VerifyDistributionOptions): Promise<PublicationMetadata> => {
   const metadata = parseMetadata(
     JSON.parse(await readFile(join(distRoot, "_publication.json"), "utf8")) as unknown,
@@ -77,6 +425,21 @@ export const verifyDistribution = async ({
     !metadata.routes.some((route) => route.startsWith("/sources/"))
   ) {
     throw new Error("the publication slice requires home, insight, and source routes");
+  }
+  if (
+    !metadata.routes.some((route) => route.startsWith("/topics/")) ||
+    !metadata.routes.some((route) => route.endsWith("/topics/"))
+  ) {
+    throw new Error("the seven reader pages require topic routes");
+  }
+  if (requireSevenPageRelease) {
+    // 最终候选的七类页面完整性：标签详情与时间线缺一不可。
+    if (!metadata.routes.some((route) => route.startsWith("/tags/"))) {
+      throw new Error("the seven-page release candidate requires tag detail routes");
+    }
+    if (!metadata.routes.includes("/timeline/")) {
+      throw new Error("the seven-page release candidate requires the timeline route");
+    }
   }
   if (new Set(metadata.routes).size !== metadata.routes.length) {
     throw new Error("publication metadata contains duplicate routes");
@@ -94,13 +457,45 @@ export const verifyDistribution = async ({
     /\.(?:css|html|js)$/.test(candidate),
   )) {
     const source = await readFile(join(distRoot, path), "utf8");
-    if (
-      /\b(?:src|srcset)=["'](?:https?:)?\/\//i.test(source) ||
-      /\b(?:url|import)\s*\(\s*["']?(?:https?:)?\/\//i.test(source) ||
-      /\b(?:fetch|import)\s*\(\s*["'](?:https?:)?\/\//i.test(source)
-    ) {
-      throw new Error(`external runtime dependency found in ${path}`);
+    if (path.endsWith(".html")) {
+      scanHtmlSecurity(source, path);
+    } else if (path.endsWith(".js")) {
+      scanScriptSecurity(source, path);
+    } else {
+      scanStyleSecurity(source, path);
     }
+  }
+
+  const release = JSON.parse(
+    await readFile(join(distRoot, "release.json"), "utf8"),
+  ) as unknown as Partial<ReleaseMetadata>;
+  if (
+    release.schemaVersion !== 1 ||
+    release.publicationId !== metadata.publicationId ||
+    release.buildSha !== metadata.buildSha ||
+    typeof release.generatedAt !== "string" ||
+    !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(
+      release.generatedAt,
+    )
+  ) {
+    throw new Error("release metadata is invalid or does not match the publication");
+  }
+
+  const reminders = JSON.parse(
+    await readFile(join(distRoot, "maintenance", "reminders.json"), "utf8"),
+  ) as unknown as Partial<MaintenanceReminders>;
+  if (reminders.schemaVersion !== 1 || !Array.isArray(reminders.reminders)) {
+    throw new Error("maintenance reminders metadata is invalid");
+  }
+  const maintenanceFiles = outputFiles.filter((path) => path.startsWith("maintenance/"));
+  if (maintenanceFiles.join("\n") !== "maintenance/reminders.json") {
+    throw new Error("maintenance status must only publish desensitized JSON");
+  }
+  const reportRoutes = metadata.routes.filter((route) =>
+    /\/(?:reports?|daily|weekly|admin)(?:\/|$)/.test(route),
+  );
+  if (reportRoutes.length > 0) {
+    throw new Error(`report or maintenance HTML routes are forbidden: ${reportRoutes}`);
   }
 
   const routeSet = new Set(metadata.routes);
@@ -221,10 +616,12 @@ export const verifyDistribution = async ({
 };
 
 if (resolve(process.argv[1] ?? "") === fileURLToPath(import.meta.url)) {
+  // CLI 验证的是最终发布候选 dist：必须通过七页面完整性验收。
   const metadata = await verifyDistribution({
     distRoot: join(process.cwd(), "dist"),
+    requireSevenPageRelease: true,
   });
   console.log(
-    `Verified ${metadata.routes.length} route(s) for ${metadata.publicationId}`,
+    `Verified ${metadata.routes.length} route(s) for ${metadata.publicationId} (seven-page release candidate)`,
   );
 }
