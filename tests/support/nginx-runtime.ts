@@ -158,6 +158,9 @@ export interface ServeWithNginxOptions {
   readonly failIdentityQuery?: boolean;
   /** 测试注入：令身份捕获阶段的 ps 输出为非法值（模拟无效输出）。 */
   readonly invalidIdentityOutput?: boolean;
+  /** 测试注入：在身份捕获查询 master PGID 的瞬间终止 master，
+   * 确定性复现“身份捕获期间 master 退出”。 */
+  readonly killMasterDuringIdentityQuery?: boolean;
 }
 
 const STOP_TIMEOUT_MS = 10_000;
@@ -251,6 +254,31 @@ export const serveWithNginx = async (
   // 直接失败，绝不返回身份不完整的实例——缺失 PGID 会让后续清理把
   // “归属未知”误当“没有实例进程”而提前报成功。
   let instancePgid: number | undefined;
+  // 启动时捕获的本实例 worker PID（master 存活时按 PPID 枚举）。PGID
+  // 是首选身份；但身份捕获失败/期间 master 退出时，靠这组 PID 完成失败
+  // 收尾（孤儿 worker cmdline 不含 configDir，无法事后识别）。
+  let startupWorkerPids: readonly number[] = [];
+  const captureStartupWorkers = async (): Promise<void> => {
+    if (!child?.pid) return;
+    const { stdout } = await execFileAsync("ps", ["-eo", "pid,ppid,stat,command"]);
+    const workers: number[] = [];
+    for (const line of stdout.split("\n")) {
+      const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
+      if (!match) continue;
+      const pid = Number(match[1]);
+      const ppid = Number(match[2]);
+      const state = match[3] ?? "";
+      const command = match[4] ?? "";
+      if (
+        !state.startsWith("Z") &&
+        command.includes("nginx: worker process") &&
+        ppid === child.pid
+      ) {
+        workers.push(pid);
+      }
+    }
+    startupWorkerPids = workers;
+  };
   const captureInstancePgid = async (): Promise<number> => {
     if (instancePgid !== undefined) return instancePgid;
     if (!child?.pid) {
@@ -260,6 +288,12 @@ export const serveWithNginx = async (
     }
     let stdout: string;
     try {
+      if (options.killMasterDuringIdentityQuery) {
+        // 确定性注入：在身份查询瞬间终止 master（worker 尚未被捕获，
+        // 模拟身份建立前 master 崩溃）。
+        process.kill(child.pid, "SIGKILL");
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+      }
       if (options.failIdentityQuery) {
         throw new Error("injected identity query failure");
       }
@@ -379,9 +413,17 @@ export const serveWithNginx = async (
       }
     };
 
-    // 以进程组身份枚举本实例当前存活 worker（含替代 worker 与孤儿 worker）。
+    // 以进程组身份枚举本实例当前存活 worker（含替代 worker 与孤儿
+    // worker）；身份缺失（启动早期失败）时退回启动时捕获的 worker PID
+    // ——孤儿 worker cmdline 不含 configDir，离开这份清单就无法追踪。
     let trackedWorkers = (await instanceProcesses()).filter((pid) => pid !== child!.pid);
-
+    if (trackedWorkers.length === 0) {
+      const aliveAtStartup: number[] = [];
+      for (const pid of startupWorkerPids) {
+        if (pid !== child!.pid && (await pidAlive(pid))) aliveAtStartup.push(pid);
+      }
+      trackedWorkers = aliveAtStartup;
+    }
     if (await masterAlive()) {
       signal("SIGTERM");
     }
@@ -460,7 +502,14 @@ export const serveWithNginx = async (
     // 以进程组身份枚举本实例存活 worker：跨 worker 重建持续追踪，
     // 不依赖采样时的 PID 集合。
     const instancePids = await instanceProcesses();
-    const workersAlive = instancePids.filter((pid) => pid !== child?.pid);
+    let workersAlive = instancePids.filter((pid) => pid !== child?.pid);
+    if (workersAlive.length === 0 && startupWorkerPids.length > 0) {
+      const aliveAtStartup: number[] = [];
+      for (const pid of startupWorkerPids) {
+        if (pid !== child?.pid && (await pidAlive(pid))) aliveAtStartup.push(pid);
+      }
+      workersAlive = aliveAtStartup;
+    }
     // 端口归属检查：本实例进程树退出后，端口可能被无关服务占用（例如测试
     // 的占位服务）。只把“端口仍被本实例进程持有”视为未退出；无关监听者
     // 不影响本实例资源回收，也不得被停止或等待。
@@ -515,8 +564,10 @@ export const serveWithNginx = async (
             // 最终确认——master cmdline 含 configDir；worker 由 master fork，
             // master 已退出且无本实例 cmdline 进程时，端口不可能属于本实例
             // （例如端口被无关占位服务占用、nginx 绑定失败的启动路径）。
-            // 仍有本实例 cmdline 进程存活时保守视为持有（清理失败）。
-            portOwnedByInstance = await anyConfigDirProcessAlive();
+            // 仍有本实例 cmdline 进程或启动清单 worker 存活时保守视为
+            // 持有（清理失败）。
+            portOwnedByInstance =
+              workersAlive.length > 0 || (await anyConfigDirProcessAlive());
           } else {
             // 身份已验证：监听进程 PGID 与本实例组一致即为本实例持有。
             portOwnedByInstance = listenerPgids.some((pgid) => pgid === instancePgid);
@@ -528,7 +579,8 @@ export const serveWithNginx = async (
           // 否则保守视为本实例仍持有（清理失败），不得当作无关放行
           // （身份未知绝不等于“没有实例进程”）。
           if (instancePgid === undefined) {
-            portOwnedByInstance = await anyConfigDirProcessAlive();
+            portOwnedByInstance =
+              workersAlive.length > 0 || (await anyConfigDirProcessAlive());
           } else {
             portOwnedByInstance =
               (await instanceProcesses()).length > 0 ||
@@ -734,6 +786,10 @@ export const serveWithNginx = async (
         ),
       );
     }
+    // 在身份（PGID）捕获之前先记录 worker PID：身份捕获失败或期间
+    // master 退出时，失败收尾仍可按 PID 终止 worker，不会因身份缺失而
+    // 把孤儿 worker 当作无关进程放行。
+    await captureStartupWorkers();
     // 启动成功即捕获并验证本实例进程组身份（PGID）：master 与其 fork
     // 的一切 worker（含后续重建的替代 worker）都继承该组，master 崩溃
     // 后仍可按组识别孤儿 worker。查询失败/输出非法/归属不符均视为启动

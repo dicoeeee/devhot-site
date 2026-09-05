@@ -324,12 +324,24 @@ const calleeConstructorName = (callee: AcornNode): string | undefined => {
 };
 
 const scanScriptSecurity = (source: string, path: string): void => {
+  // 产物 JS 必须可解析：发行脚本可能是经典脚本或同源 ES module
+  //（静态 import/export 仅在 module 语法下合法）。先按经典脚本解析，
+  // 失败再按 module 解析；两种语法都不合法才视为不可解析。无论以哪种
+  // 语法解析成功，后续安全检查（外部 URL、Worker 构造等）都照常执行，
+  // 不因支持 module 而绕过 AST 扫描。
   let program: AcornNode;
   try {
     program = parseScript(source, { ecmaVersion: "latest" });
   } catch {
-    // 产物 JS 必须可解析；解析失败本身即为门禁违规。
-    throw new Error(`distributed script is not parseable: ${path}`);
+    try {
+      program = parseScript(source, {
+        ecmaVersion: "latest",
+        sourceType: "module",
+      });
+    } catch {
+      // 产物 JS 必须可解析；解析失败本身即为门禁违规。
+      throw new Error(`distributed script is not parseable: ${path}`);
+    }
   }
 
   const visit = (node: AcornNode): void => {

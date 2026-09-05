@@ -134,6 +134,47 @@ const instanceProcessPids = async (instance: NginxServer): Promise<number[]> => 
 };
 
 /** 每个实例 stop() 后的完整断言：进程组、端口、目录全部消失。 */
+/**
+ * 全机真实 nginx 进程/监听端口/临时目录快照，用于测试前后增量断言：
+ * 只断言“本次运行没有新增”，不要求机器上不存在其他 Nginx 实例
+ * （与用户自建的独立服务正常共存）。
+ */
+const nginxSnapshot = async (): Promise<{
+  pids: readonly number[];
+  ports: readonly number[];
+  dirs: readonly string[];
+}> => {
+  const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
+  const pids = stdout
+    .split("\n")
+    .filter((line) => /^\s*\d+\s+nginx:\s/.test(line))
+    .map((line) => Number(line.trim().split(/\s+/)[0]));
+  const lsof = await execFileAsync("lsof", ["-nP", "-iTCP", "-sTCP:LISTEN"]).catch(
+    () => undefined,
+  );
+  const ports =
+    lsof?.stdout
+      .split("\n")
+      .filter((line) => /nginx/.test(line))
+      .map((line) => Number(line.match(/:(\d+)\s/)?.[1] ?? NaN))
+      .filter((port) => Number.isInteger(port)) ?? [];
+  return { pids, ports, dirs: await listConfDirs() };
+};
+
+const assertNoNewNginxResidue = async (before: {
+  pids: readonly number[];
+  ports: readonly number[];
+  dirs: readonly string[];
+}): Promise<void> => {
+  const after = await nginxSnapshot();
+  const addedPids = after.pids.filter((pid) => !before.pids.includes(pid));
+  const addedPorts = after.ports.filter((port) => !before.ports.includes(port));
+  const addedDirs = after.dirs.filter((dir) => !before.dirs.includes(dir));
+  expect(addedPids, "new nginx processes left behind").toEqual([]);
+  expect(addedPorts, "new nginx listeners left behind").toEqual([]);
+  expect(addedDirs, "new nginx config dirs left behind").toEqual([]);
+};
+
 const assertInstanceGone = async (instance: NginxServer): Promise<void> => {
   const survivors = await instanceProcessPids(instance);
   expect(
@@ -473,7 +514,7 @@ describe("pinned nginx runtime process lifecycle", () => {
     { timeout: 60_000 },
     async () => {
       const nginxBinary = await ensureNginxRuntime();
-      const dirsBefore = await listConfDirs();
+      const snapshotBefore = await nginxSnapshot();
       // 身份查询失败：启动必须明确失败，不得返回身份不完整的实例；
       // 收尾必须覆盖已启动的 master/worker 并回收目录。
       const thrown = await serveWithNginx(
@@ -494,15 +535,9 @@ describe("pinned nginx runtime process lifecycle", () => {
       expect(thrown!.message).toMatch(/failed to read process group of master pid \d+/);
       // 独立验证实际退出：无 nginx 进程、目录已回收。
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
-      const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
-      // 只匹配真实 nginx 进程标题（行首数字后紧跟 nginx: 进程名），排除
-      // 恰好把测试源码带进命令行的外层 shell。
-      const nginxLines = stdout
-        .split("\n")
-        .filter((line) => /^\s*\d+\s+nginx:\s/.test(line));
-      expect(nginxLines).toEqual([]);
-      const dirsAfter = await listConfDirs();
-      expect(dirsAfter.filter((dir) => !dirsBefore.includes(dir))).toEqual([]);
+      // 增量断言：本次失败实例无新增进程/端口/目录；机器上既有的其他
+      // Nginx 实例（例如用户自建服务）不受影响，也不作为失败依据。
+      await assertNoNewNginxResidue(snapshotBefore);
     },
   );
 
@@ -511,7 +546,7 @@ describe("pinned nginx runtime process lifecycle", () => {
     { timeout: 60_000 },
     async () => {
       const nginxBinary = await ensureNginxRuntime();
-      const dirsBefore = await listConfDirs();
+      const snapshotBefore = await nginxSnapshot();
       const thrown = await serveWithNginx(
         nginxBinary,
         build.distRoot,
@@ -529,61 +564,111 @@ describe("pinned nginx runtime process lifecycle", () => {
       expect(thrown).toBeDefined();
       expect(thrown!.message).toMatch(/invalid process group id/);
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
-      const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
-      // 只匹配真实 nginx 进程标题（行首数字后紧跟 nginx: 进程名），排除
-      // 恰好把测试源码带进命令行的外层 shell。
-      const nginxLines = stdout
-        .split("\n")
-        .filter((line) => /^\s*\d+\s+nginx:\s/.test(line));
-      expect(nginxLines).toEqual([]);
-      const dirsAfter = await listConfDirs();
-      expect(dirsAfter.filter((dir) => !dirsBefore.includes(dir))).toEqual([]);
+      // 增量断言：本次失败实例无新增进程/端口/目录；机器上既有的其他
+      // Nginx 实例（例如用户自建服务）不受影响，也不作为失败依据。
+      await assertNoNewNginxResidue(snapshotBefore);
     },
   );
 
   it(
     "fails startup when the master exits during identity capture",
-    { timeout: 60_000 },
+    { timeout: 90_000 },
     async () => {
       const nginxBinary = await ensureNginxRuntime();
-      const dirsBefore = await listConfDirs();
-      // 在身份捕获前外部终止 master：启动必须失败（而非返回残缺实例），
-      // 且错误中包含身份捕获失败的原因。
-      const attempt = serveWithNginx(
+      const snapshotBefore = await nginxSnapshot();
+      // 确定性注入：在身份查询 master PGID 的瞬间 SIGKILL master。
+      // worker 已由启动清单捕获（cmdline 不含 configDir 的孤儿 worker
+      // 只能靠它追踪）。启动必须被拒绝，且错误同时保留身份失败与
+      // 清理结果——若 worker/端口/目录任一未收尾，必须报告清理失败。
+      const thrown = await serveWithNginx(
         nginxBinary,
         build.distRoot,
         join(projectRoot, "deploy", "nginx-serving.conf"),
         join(projectRoot, "deploy", "security-headers.conf"),
         await findFreePort(),
-      );
-      // 竞争式终止：尽力在身份捕获前杀掉 master（若未赶上则测试仍会
-      // 通过——身份捕获路径对已退出 master 的失败分支不可注入，
-      // 由上面的查询失败用例覆盖该分支的错误语义）。
-      const thrown = await attempt.then(
+        { killMasterDuringIdentityQuery: true },
+      ).then(
         (instance) => {
-          process.kill(instance.masterPid, "SIGKILL");
-          return instance.stop().then(
-            () => undefined,
-            () => undefined,
-          );
+          // 正常启动成功绝不允许出现：该注入必然使身份捕获失败。
+          void instance;
+          throw new Error("expected startup to fail during identity capture");
         },
         (error: unknown) => error as Error,
       );
-      if (thrown instanceof Error) {
-        expect(thrown.message).toMatch(
-          /did not become reachable|exited before readiness|identity/,
-        );
-      }
+      expect(thrown).toBeDefined();
+      const messages =
+        thrown instanceof AggregateError
+          ? thrown.errors.map((error) => (error as Error).message)
+          : [thrown.message];
+      // 身份捕获失败是启动错误。
+      expect(
+        messages.some((message) =>
+          /failed to read process group|exited before identity capture/.test(message),
+        ),
+        JSON.stringify(messages),
+      ).toBe(true);
+      // 清理必须完整：worker、端口、目录全部收尾，否则报告清理失败
+      // （不得只包含身份错误就当作收尾成功）。
+      expect(
+        messages.some((message) =>
+          /cleanup failed|still listening|still alive|survived/.test(message),
+        ),
+        JSON.stringify(messages),
+      ).toBe(false);
       await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
-      const { stdout } = await execFileAsync("ps", ["-eo", "pid,command"]);
-      // 只匹配真实 nginx 进程标题（行首数字后紧跟 nginx: 进程名），排除
-      // 恰好把测试源码带进命令行的外层 shell。
-      const nginxLines = stdout
-        .split("\n")
-        .filter((line) => /^\s*\d+\s+nginx:\s/.test(line));
-      expect(nginxLines).toEqual([]);
-      const dirsAfter = await listConfDirs();
-      expect(dirsAfter.filter((dir) => !dirsBefore.includes(dir))).toEqual([]);
+      // 增量断言：本次失败实例无新增进程/端口/目录；机器上既有的其他
+      // Nginx 实例（例如用户自建服务）不受影响，也不作为失败依据。
+      await assertNoNewNginxResidue(snapshotBefore);
+    },
+  );
+
+  it(
+    "coexists with an unrelated pre-existing nginx service",
+    { timeout: 90_000 },
+    async () => {
+      // 先启动一个与测试无关的独立 Nginx（另一 configDir、另一端口），
+      // 再执行身份查询失败用例：本实例失败收尾不得影响既有服务，
+      // 断言也不得把既有进程当作本实例残留。
+      const unrelatedPort = await findFreePort();
+      const unrelated = await serveWithNginx(
+        await ensureNginxRuntime(),
+        build.distRoot,
+        join(projectRoot, "deploy", "nginx-serving.conf"),
+        join(projectRoot, "deploy", "security-headers.conf"),
+        unrelatedPort,
+      );
+      const unrelatedPids = await instanceProcessPids(unrelated);
+      expect(unrelatedPids.length).toBeGreaterThan(0);
+      try {
+        const snapshotBefore = await nginxSnapshot();
+        const thrown = await serveWithNginx(
+          await ensureNginxRuntime(),
+          build.distRoot,
+          join(projectRoot, "deploy", "nginx-serving.conf"),
+          join(projectRoot, "deploy", "security-headers.conf"),
+          await findFreePort(),
+          { failIdentityQuery: true },
+        ).then(
+          (instance) => {
+            void instance;
+            return undefined;
+          },
+          (error: unknown) => error as Error,
+        );
+        expect(thrown).toBeDefined();
+        expect(thrown!.message).toMatch(/failed to read process group of master pid \d+/);
+        await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+        // 失败实例无新增残留（既有服务仍在运行，因此不能用全机空集断言）。
+        await assertNoNewNginxResidue(snapshotBefore);
+        // 既有服务不受影响：仍可响应、进程仍存活。
+        const probe = await fetch(`${unrelated.origin}/release.json`);
+        expect(probe.status).toBe(200);
+        const stillAlive = await instanceProcessPids(unrelated);
+        expect(stillAlive.length).toBeGreaterThan(0);
+      } finally {
+        await unrelated.stop();
+        await assertInstanceGone(unrelated);
+      }
     },
   );
 
@@ -786,6 +871,7 @@ describe("pinned nginx runtime process lifecycle", () => {
     "reclaims its configDir when a foreign service holds the port",
     { timeout: 30_000 },
     async () => {
+      const dirsBefore = await listConfDirs();
       const { createServer } = await import("node:http");
       const blocker = createServer((_request, response) => {
         response.writeHead(200, { "content-type": "text/plain" });
@@ -796,7 +882,7 @@ describe("pinned nginx runtime process lifecycle", () => {
       );
       const blockedPort = (blocker.address() as { port: number }).port;
       const nginxBinary = await ensureNginxRuntime();
-      const dirsBefore = await listConfDirs();
+      const snapshotBefore = await nginxSnapshot();
       let configDirLeft: string | undefined;
       try {
         // 本实例 nginx 绑定失败退出：启动错误保留，目录必须被回收。

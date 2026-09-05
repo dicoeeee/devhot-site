@@ -510,18 +510,53 @@ describe("publication output", () => {
     ).resolves.toEqual(expect.objectContaining({ schemaVersion: 1 }));
   });
 
-  it("still allows a same-origin external module script", async () => {
-    // 同源外置模块（type="module" + 站内 src）是合法发布形态（当前
-    // 候选的时间线脚本即此类），必须继续放行——收紧脚本类型规则不
-    // 得误伤它。
+  it("still allows a same-origin ES module with real import/export syntax", async () => {
+    // 同源外置模块（type="module" + 站内 src）是合法发布形态。脚本正文
+    // 必须包含真实的静态 import/export 语法——经典脚本解析会拒绝模块
+    // 语法，扫描器必须按 module 语法正确解析后再执行安全检查。
     const tamperedDist = await newTamperedDist();
     await cp(distRoot, tamperedDist, { recursive: true });
     await appendFile(
       join(tamperedDist, ...defaultDomainOutputSegments, "index.html"),
-      '<script type="module" src="/scripts/timeline.js"></script>',
+      '<script type="module" src="/scripts/entry.js"></script>',
     );
+    const scriptsDir = join(tamperedDist, "scripts");
+    await appendFile(
+      join(scriptsDir, "entry.js"),
+      'import { answer } from "./dep.js";\n',
+    );
+    await appendFile(join(scriptsDir, "dep.js"), "export const answer = 42;\n");
 
     await expect(verifyDistribution({ distRoot: tamperedDist })).resolves.toBeTruthy();
+  });
+
+  it("rejects a module script that imports a third-party URL", async () => {
+    // 模块语法解析成功后仍须执行安全检查：第三方 import 一样拒绝。
+    const tamperedDist = await newTamperedDist();
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await appendFile(
+      join(tamperedDist, ...defaultDomainOutputSegments, "index.html"),
+      '<script type="module" src="/scripts/entry.js"></script>',
+    );
+    await appendFile(
+      join(tamperedDist, "scripts", "entry.js"),
+      'import { beacon } from "https://example.invalid/collect.js";\n',
+    );
+
+    await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
+      /external runtime dependency|third-party/,
+    );
+  });
+
+  it("rejects a distributed script with invalid syntax in both script and module grammars", async () => {
+    // 两种语法都无法解析的脚本仍然是门禁违规。
+    const tamperedDist = await newTamperedDist();
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await appendFile(join(tamperedDist, "scripts", "timeline.js"), "const broken = {");
+
+    await expect(verifyDistribution({ distRoot: tamperedDist })).rejects.toThrow(
+      /not parseable/,
+    );
   });
 
   it("still allows a JSON data-block script", async () => {
