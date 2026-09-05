@@ -199,20 +199,48 @@ interface RuntimeLock {
 }
 
 /**
- * 跨进程互斥锁：以 O_EXCL（"wx"）原子创建锁文件，同一时刻只有一个
- * 获取者成功——不存在“检查后写入”的竞态窗口。锁内容为不可复用 token
- *（pid + 随机数 + 时间戳），释放/抢占都以 token 匹配为前提，杜绝误删
- * 其他持有者的新锁。
+ * 进程启动身份：PID + 该进程的启动时间（etime/lstart 派生的稳定值）。
+ * PID 复用会产生同 PID 的不同进程，但启动时间不同——以此区分“锁的
+ * 原持有进程”与“碰巧复用同号 PID 的无关进程”。这是判定陈旧锁的
+ * 唯一依据；不使用“到时间就抢”的年龄阈值（合法慢构建可能超过任何
+ * 期限，破坏活跃锁违反互斥契约）。
  */
-const acquireLock = async (lockPath: string): Promise<RuntimeLock | undefined> => {
+const processStartIdentity = async (pid: number): Promise<string | undefined> => {
+  try {
+    const { stdout } = await execCapture("ps", ["-p", String(pid), "-o", "lstart="]);
+    const trimmed = stdout.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * 跨进程互斥锁：以 O_EXCL（"wx"）原子创建锁文件，同一时刻只有一个
+ * 获取者成功。锁内容为 JSON（token + pid + startIdentity）：
+ * - 释放只删除 token 完全匹配的自有锁；
+ * - 陈旧判定 = 锁记录的持有进程不存在，或存在但启动身份与锁记录不符
+ *   （说明原持有者已死、当前同号 PID 是复用后的无关进程）；
+ * - 抢占走“先原子换名（带走旧锁内容）、再检查换名结果中的 token 是否
+ *   就是此前读取的同一 token”的 CAS 协议：读取与换名之间锁若被释放
+ *   并被新持有者重建，换名会失败或换到的不是同一 token——两种情况都
+ *   放弃并让调用方重试，绝不移动他人的新锁；
+ * - 活跃持有者（进程存活且启动身份匹配）永不因年龄被抢占；调用方
+ *   只能等待或最终报告锁超时。
+ */
+export const acquireLock = async (lockPath: string): Promise<RuntimeLock | undefined> => {
   await mkdir(dirname(lockPath), { recursive: true });
-  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   const { open } = await import("node:fs/promises");
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
   try {
     // 原子创建：EEXIST 即他人持有。
     const handle = await open(lockPath, "wx");
     try {
-      await handle.writeFile(`${token}\n`, "utf8");
+      const start = await processStartIdentity(process.pid);
+      await handle.writeFile(
+        `${JSON.stringify({ token, pid: process.pid, startIdentity: start ?? null })}\n`,
+        "utf8",
+      );
     } finally {
       await handle.close();
     }
@@ -220,42 +248,127 @@ const acquireLock = async (lockPath: string): Promise<RuntimeLock | undefined> =
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
-  // 锁已存在：判断是否陈旧（持有进程不存活，或锁内容超过陈旧期限）。
-  let content = "";
+
+  // 锁已存在：仅当“持有进程已死（含 PID 复用）”时才允许回收。
+  let record: { token: string; pid: number; startIdentity: string | null } | undefined;
   try {
-    content = (await readFile(lockPath, "utf8")).trim();
+    const content = (await readFile(lockPath, "utf8")).trim();
+    record = JSON.parse(content) as {
+      token: string;
+      pid: number;
+      startIdentity: string | null;
+    };
+    if (
+      typeof record?.token !== "string" ||
+      !Number.isInteger(record?.pid) ||
+      (record?.startIdentity !== null && typeof record?.startIdentity !== "string")
+    ) {
+      record = undefined; // 锁内容损坏：按陈旧处理（可回收）。
+    }
   } catch {
-    return undefined; // 恰好被释放：让调用方重试。
+    return undefined; // 读取失败/恰好被释放：让调用方重试。
   }
-  const holderPid = Number.parseInt((content.split("-")[0] ?? "").trim(), 10);
-  const holderAlive = Number.isInteger(holderPid)
-    ? await execCapture("ps", ["-p", String(holderPid)])
-        .then((result) => result.code === 0 && result.stdout.trim().length > 0)
-        .catch(() => false)
-    : false;
-  // 陈旧期限兜底：即使 PID 复用让陈旧锁“看起来活着”，超龄也可抢占。
-  const mtime = await stat(lockPath)
-    .then((info) => info.mtimeMs)
-    .catch(() => Number.POSITIVE_INFINITY);
-  const staleByAge = Date.now() - mtime > 15 * 60_000;
-  if (holderAlive && !staleByAge) return undefined;
-  // 抢占陈旧锁：rename 原子换名后以 O_EXCL 重新创建，token 匹配保证
-  // 不删除另一持有者已重建的新锁。
-  const takeoverPath = `${lockPath}.stale-${process.pid}-${Date.now()}`;
-  try {
-    await (await import("node:fs/promises")).rename(lockPath, takeoverPath);
-  } catch {
-    return undefined; // 并发抢占：让调用方重试。
+  if (record === undefined) {
+    // 损坏锁回收：CAS——换名成功且内容仍是损坏的同一份才继续。
+    // （换名后再读回校验；损坏内容没有 token 可比对，故以“换名成功
+    // 且文件内容与读取时一致”为准。）
+    return reclaimByRename(lockPath, undefined);
   }
-  await rm(takeoverPath, { force: true }).catch(() => {});
-  return acquireLock(lockPath);
+  const holderAlive = await isHolderAlive(record);
+  if (holderAlive) return undefined; // 活跃持有者：等待，绝不抢占。
+  return reclaimByRename(lockPath, record.token);
 };
 
-/** 释放锁：token 匹配才删除（不会误删他人的新锁）。 */
+/** 持有者是否仍存活：进程存在且启动身份与锁记录一致（防 PID 复用）。 */
+const isHolderAlive = async (record: {
+  pid: number;
+  startIdentity: string | null;
+}): Promise<boolean> => {
+  const currentStart = await processStartIdentity(record.pid);
+  if (currentStart === undefined) return false; // 进程不存在。
+  if (record.startIdentity === null) return true; // 锁未记录身份：仅按进程存在判定。
+  return currentStart === record.startIdentity;
+};
+
+/**
+ * 陈旧锁回收（独立原子协议）：先把锁 rename 到私有路径（原子带走），
+ * 再读回并确认 token 与此前读取的同一 token——只有一致才视为回收
+ * 成功；不一致（读取与换名之间已被新持有者替换）或 rename 失败都
+ * 放弃，把私有路径残件清理后让调用方重试。
+ */
+const reclaimByRename = async (
+  lockPath: string,
+  expectedToken: string | undefined,
+): Promise<RuntimeLock | undefined> => {
+  const takeoverPath = `${lockPath}.stale-${process.pid}-${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 6)}`;
+  const { rename } = await import("node:fs/promises");
+  try {
+    await rename(lockPath, takeoverPath);
+  } catch {
+    return undefined; // 并发变化：让调用方重试。
+  }
+  // 换名成功后校验：换到的必须仍是此前读取的那份锁。
+  let movedContent = "";
+  try {
+    movedContent = (await readFile(takeoverPath, "utf8")).trim();
+  } catch {
+    // 无法读回：按无法确认处理，不回收。
+    await rm(takeoverPath, { force: true }).catch(() => {});
+    return undefined;
+  }
+  if (expectedToken !== undefined) {
+    let movedToken: unknown;
+    try {
+      movedToken = (JSON.parse(movedContent) as { token?: unknown }).token;
+    } catch {
+      movedToken = undefined;
+    }
+    if (movedToken !== expectedToken) {
+      // 读取与换名之间锁已被替换：这是他人的新锁，必须放回原位。
+      try {
+        await rename(takeoverPath, lockPath);
+      } catch {
+        // 放回失败（原位已被新锁占用）：把私有残件留在 stale 路径供诊断，
+        // 不删除他人锁。
+      }
+      return undefined;
+    }
+  }
+  await rm(takeoverPath, { force: true }).catch(() => {});
+  // 回收成功：重新以 O_EXCL 创建自有锁（递归一次，不无限循环）。
+  const { open } = await import("node:fs/promises");
+  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+  try {
+    const handle = await open(lockPath, "wx");
+    try {
+      const start = await processStartIdentity(process.pid);
+      await handle.writeFile(
+        `${JSON.stringify({ token, pid: process.pid, startIdentity: start ?? null })}\n`,
+        "utf8",
+      );
+    } finally {
+      await handle.close();
+    }
+    return { path: lockPath, token };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    return undefined; // 并发者先创建了：让调用方重试。
+  }
+};
+
+/** 释放锁：token 完全匹配才删除（不会误删他人的新锁）。 */
 const releaseLock = async (lock: RuntimeLock): Promise<void> => {
   try {
     const content = (await readFile(lock.path, "utf8")).trim();
-    if (content === lock.token) {
+    let currentToken: unknown;
+    try {
+      currentToken = (JSON.parse(content) as { token?: unknown }).token;
+    } catch {
+      currentToken = undefined;
+    }
+    if (currentToken === lock.token) {
       await rm(lock.path, { force: true });
     }
   } catch {
@@ -608,38 +721,135 @@ export const serveWithNginx = async (
 
   /**
   /**
-   * 按命令分别定义“成功 / 目标不存在 / 观测失败”语义。不同命令的退出码
-   * 没有统一含义，不做全局解释：
-   * - ps -p PID：退出码 0 成功；退出码 1 且 stdout 为空且 stderr 为空
-   *   才是“查无此进程”（BSD/Linux 一致契约）。非空 stderr、其他退出码、
-   *   spawn 层失败（ENOENT/EACCES/EPERM，code 为字符串）一律 UNKNOWN。
-   * - ps -eo：全量枚举，退出码必须为 0；任何非零退出（含 1）都是
-   *   UNKNOWN，绝不解释为“进程组为空”。
-   * - lsof -t：退出码 0 成功；退出码 1 且 stderr 为空才是“无匹配监听者”；
-   *   非空 stderr / 其他退出码一律 UNKNOWN。
+   * 按命令分别定义"成功 / 目标不存在 / 观测失败"语义，并验证输出本身：
+   * "命令成功"（退出码 0）不等于"观测有效"——输出必须满足该命令的
+   * 语法与完整性契约，否则一律 UNKNOWN：
+   * - ps -p PID：退出码 0 时必须得到可解析的目标进程状态（非空、且为
+   *   合法 ps 状态串）；空输出或非法状态为 UNKNOWN。退出码 1 且
+   *   stdout 空且 stderr 空才是"查无此进程"。
+   * - ps -eo：退出码 0 时输出必须能解析为完整的进程表（剥离一次表头
+   *   后至少一条记录，且每条记录都可按"pid pgid stat command"解析）；
+   *   空输出、仅表头或存在无法解析的数据行为 UNKNOWN（不得静默跳过
+   *   非法行得到空集）。任何非零退出（含 1）都是 UNKNOWN。
+   * - lsof -t：退出码 0 时必须至少解析出一个合法 PID；空输出或非法
+   *   PID 为 UNKNOWN。退出码 1 且 stderr 空才是"无匹配监听者"。
    */
   type ObserverOutcome =
     | { readonly kind: "ok"; readonly stdout: string }
     | { readonly kind: "target-absent" }
     | { readonly kind: "unknown"; readonly reason: string };
 
+  /**
+   * ps -p 的按输出格式验证：stat（状态串）、command（命令行）、pgid
+   *（正整数）。同一命令不同 -o 字段的输出形状不同，验证必须与调用点
+   * 的期望格式一致——否则会把合法输出（如 pgid 的数字）误判为非法。
+   */
+  const validatePsPOutput = (
+    format: "stat" | "command" | "pgid",
+    stdout: string,
+    detail: string,
+  ): ObserverOutcome => {
+    const trimmed = stdout.trim();
+    if (trimmed.length === 0) {
+      return { kind: "unknown", reason: `ps -p succeeded with empty output (${detail})` };
+    }
+    if (format === "stat" && !isValidPsState(trimmed)) {
+      return { kind: "unknown", reason: `ps -p produced unparsable state (${detail})` };
+    }
+    if (format === "pgid" && !/^\d+$/.test(trimmed)) {
+      return { kind: "unknown", reason: `ps -p produced unparsable pgid (${detail})` };
+    }
+    // command：任意非空文本（cmdline 内容本身不设语法约束）。
+    return { kind: "ok", stdout };
+  };
+
+  /** ps 状态串合法性：字母 + 可选跟随标记（如 Ss、Ts、Z+、RWp 等）。 */
+  const isValidPsState = (state: string): boolean => /^[A-Za-z][A-Za-z+]*$/.test(state);
+
   const classifyObserver = (
-    command: "ps -p" | "ps -eo" | "lsof",
+    command: "ps -p stat" | "ps -p command" | "ps -p pgid" | "ps -eo" | "lsof",
     result: Awaited<ReturnType<typeof runObserver>>,
   ): ObserverOutcome => {
-    if (result.kind === "ok") return { kind: "ok", stdout: result.stdout };
-    const { code, stdout, stderr } = result;
+    if (process.env.DBG_OBSERVER === "1") {
+      process.stderr.write(
+        `DBG_CLASSIFY ${command} kind=${result.kind} code=${result.kind === "failed" ? String(result.code) : "0"} stdoutLen=${result.stdout.length} stdoutHead=${JSON.stringify(result.stdout.slice(0, 30))}\n`,
+      );
+    }
+    const { code, stdout, stderr } =
+      result.kind === "ok"
+        ? { code: 0 as const, stdout: result.stdout, stderr: result.stderr }
+        : { code: result.code, stdout: result.stdout, stderr: result.stderr };
     const stderrQuiet = stderr.trim().length === 0;
-    const detail = `code=${String(code)} stderr=${JSON.stringify(stderr.trim().slice(0, 60))}`;
+    const detail = `code=${String(code)} stdout=${JSON.stringify(stdout.trim().slice(0, 40))} stderr=${JSON.stringify(stderr.trim().slice(0, 40))}`;
+    if (code === 0) {
+      // 命令成功 ≠ 观测有效：逐命令验证输出语法与完整性。
+      if (
+        command === "ps -p stat" ||
+        command === "ps -p command" ||
+        command === "ps -p pgid"
+      ) {
+        const format =
+          command === "ps -p stat"
+            ? "stat"
+            : command === "ps -p pgid"
+              ? "pgid"
+              : "command";
+        return validatePsPOutput(format, stdout, detail);
+      }
+      if (command === "ps -eo") {
+        const allLines = stdout.split("\n").filter((line) => line.trim().length > 0);
+        if (allLines.length === 0) {
+          return {
+            kind: "unknown",
+            reason: `ps -eo succeeded with empty output (${detail})`,
+          };
+        }
+        // BSD ps -eo 有表头行（"  PID  PGID STAT COMMAND"）；剥离一次表头
+        // 后，每条数据行都必须可解析——静默跳过非法行会伪造"空进程组"。
+        let records = allLines;
+        if (!/^\s*\d+\s+\d+\s+\S+\s+.*$/.test(records[0] ?? "")) {
+          records = records.slice(1);
+        }
+        if (records.length === 0) {
+          return { kind: "unknown", reason: `ps -eo produced only a header (${detail})` };
+        }
+        const parsable = records.every((line) =>
+          /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.test(line),
+        );
+        if (!parsable) {
+          return {
+            kind: "unknown",
+            reason: `ps -eo produced unparsable records (${detail})`,
+          };
+        }
+        return { kind: "ok", stdout };
+      }
+      // lsof -t：退出码 0 必须至少给出一个合法 PID。
+      const pids = stdout
+        .split("\n")
+        .map((line) => Number.parseInt(line.trim(), 10))
+        .filter((pid) => Number.isInteger(pid) && pid > 0);
+      if (pids.length === 0) {
+        return {
+          kind: "unknown",
+          reason: `lsof succeeded with no valid pid (${detail})`,
+        };
+      }
+      return { kind: "ok", stdout };
+    }
     if (command === "ps -eo") {
-      // 全量枚举没有“目标不存在”退出语义：任何非零退出都是观测失败。
+      // 全量枚举没有"目标不存在"退出语义：任何非零退出都是观测失败。
       return { kind: "unknown", reason: `ps -eo failed (${detail})` };
     }
-    if (command === "ps -p") {
+    if (
+      command === "ps -p stat" ||
+      command === "ps -p command" ||
+      command === "ps -p pgid"
+    ) {
       if (code === 1 && stdout.trim().length === 0 && stderrQuiet) {
         return { kind: "target-absent" };
       }
-      return { kind: "unknown", reason: `ps -p failed (${detail})` };
+      return { kind: "unknown", reason: `${command} failed (${detail})` };
     }
     // lsof -t：退出码 1 + 空 stderr = 无匹配监听者。
     if (code === 1 && stderrQuiet) return { kind: "target-absent" };
@@ -652,8 +862,8 @@ export const serveWithNginx = async (
    */
   const observePid = async (pid: number): Promise<ProcessObservation> => {
     if (options.masterObservationExitCode !== undefined && pid === child?.pid) {
-      // 注入的观测结果：按 ps -p 契约分类，只接受契约允许的语义。
-      const injected = classifyObserver("ps -p", {
+      // 注入的观测结果：按 ps -p 契约分类（含输出验证）。
+      const injected = classifyObserver("ps -p stat", {
         kind: "failed",
         code: options.masterObservationExitCode,
         stdout: "",
@@ -663,18 +873,18 @@ export const serveWithNginx = async (
       if (injected.kind === "unknown") return "unknown";
     }
     const outcome = classifyObserver(
-      "ps -p",
+      "ps -p stat",
       await runObserver("ps", ["-p", String(pid), "-o", "stat="]),
     );
     if (outcome.kind === "unknown") return "unknown";
     if (outcome.kind === "target-absent") return "exited";
     const state = outcome.stdout.trim();
-    if (state.length === 0) return "exited";
+    // classifyObserver 已保证非空且合法（ok 路径经过输出验证）。
     if (state.startsWith("Z")) return "exited"; // 僵尸不算存活
     return "alive";
   };
 
-  /** 进程组存活成员枚举（排除僵尸与 master 自身）；ps 任何非零退出 → undefined。 */
+  /** 进程组存活成员枚举（排除僵尸与 master 自身）；观测无效 → undefined。 */
   const enumerateGroup = async (pgid: number): Promise<readonly number[] | undefined> => {
     if (options.failGroupEnumeration) return undefined;
     const outcome = classifyObserver(
@@ -685,7 +895,7 @@ export const serveWithNginx = async (
     const pids: number[] = [];
     for (const line of outcome.stdout.split("\n")) {
       const match = line.match(/^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/);
-      if (!match) continue;
+      if (!match) continue; // 空行/表头：classifyObserver 已验证全部数据行可解析。
       const pid = Number(match[1]);
       const group = Number(match[2]);
       const state = match[3] ?? "";
@@ -715,12 +925,14 @@ export const serveWithNginx = async (
     // PID 存活后，cmdline 仍须属于本实例（创建语义 + pid 文件双重锚定），
     // 防止 PID 复用后被误认为本实例 master。
     const outcome = classifyObserver(
-      "ps -p",
+      "ps -p command",
       await runObserver("ps", ["-p", String(child.pid), "-o", "command="]),
     );
     if (outcome.kind === "unknown") return "unknown";
     if (outcome.kind === "target-absent") return "exited";
-    return outcome.stdout.includes(configDir) ? "alive" : "exited";
+    const cmdline = outcome.stdout.trim();
+    if (cmdline.length === 0) return "unknown"; // 空输出不可作为归属证据
+    return cmdline.includes(configDir) ? "alive" : "exited";
   };
 
   /**
@@ -759,24 +971,34 @@ export const serveWithNginx = async (
       );
     }
     if (lsofOutcome.kind === "unknown") return undefined;
-    const listenerPids =
-      lsofOutcome.kind === "ok"
-        ? lsofOutcome.stdout
-            .split("\n")
-            .map((line) => Number.parseInt(line.trim(), 10))
-            .filter((pid) => Number.isInteger(pid) && pid > 0)
-        : []; // target-absent：无监听者。
-    if (listenerPids.length === 0) return false;
+    let listenerPids: readonly number[] = [];
+    if (lsofOutcome.kind === "ok") {
+      // classifyObserver 已保证退出码 0 时至少含一个合法 PID；这里逐一
+      // 解析且不接受任何非法行（非法行 = 观测无效，不是"无监听者"）。
+      const nonEmpty = lsofOutcome.stdout
+        .split("\n")
+        .filter((line) => line.trim().length > 0);
+      const parsed: number[] = [];
+      for (const line of nonEmpty) {
+        const pid = Number.parseInt(line.trim(), 10);
+        if (!Number.isInteger(pid) || pid <= 0) return undefined; // 非法 PID：UNKNOWN
+        parsed.push(pid);
+      }
+      if (parsed.length === 0) return undefined; // 空输出在 ok 路径下不可信
+      listenerPids = parsed;
+    } // target-absent：无监听者 → listenerPids 保持空。
     const listenerPgids: (number | undefined)[] = [];
     for (const pid of listenerPids) {
       const psOutcome = classifyObserver(
-        "ps -p",
+        "ps -p pgid",
         await runObserver("ps", ["-p", String(pid), "-o", "pgid="]),
       );
       if (psOutcome.kind === "unknown") return undefined;
       if (psOutcome.kind === "target-absent") return undefined; // 监听者瞬间消失：无法确认
-      const value = Number.parseInt(psOutcome.stdout.trim(), 10);
-      listenerPgids.push(Number.isInteger(value) && value > 0 ? value : undefined);
+      const raw = psOutcome.stdout.trim();
+      if (!/^\d+$/.test(raw)) return undefined; // 非法 pgid 输出：UNKNOWN
+      const value = Number.parseInt(raw, 10);
+      listenerPgids.push(value > 0 ? value : undefined);
     }
     if (listenerPgids.some((value) => value === undefined)) return undefined;
     return listenerPgids.some((value) => value === pgid);

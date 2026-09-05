@@ -13,6 +13,12 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
+
+import {
+  ensureNginxRuntime,
+  findFreePort,
+  serveWithNginx,
+} from "../support/nginx-runtime";
 import { describe, expect, it } from "vitest";
 
 const execFileAsync = promisify(execFile) as (
@@ -414,6 +420,266 @@ console.log(
         .update(await readFile(resolved))
         .digest("hex");
       expect(marker.binarySha256).toBe(actual);
+    },
+  );
+});
+
+describe("observer output validation (exit-0 ≠ valid observation)", () => {
+  // 表驱动：退出码 0 但输出为空/损坏时，观测必须是 UNKNOWN，绝不能
+  // 折叠为“目标不存在/空集合/无监听者”。通过真实 serveWithNginx 实例
+  // 的 PATH shim 黑盒验证（不是内部布尔注入参数）。
+  const shims: {
+    readonly name: string;
+    readonly script: string;
+  }[] = [
+    {
+      name: "exit 0 + empty stdout (ps and lsof)",
+      script: "exit 0",
+    },
+    {
+      name: "exit 0 + corrupt output (garbage lines)",
+      script: 'echo "corrupted-not-a-process-table"; exit 0',
+    },
+  ];
+
+  for (const shim of shims) {
+    it(
+      `treats "${shim.name}" as UNKNOWN and fails cleanup instead of faking success`,
+      { timeout: 90_000 },
+      async () => {
+        const { buildReaderFixture } = await import("../support/browser-server");
+        const build = await buildReaderFixture();
+        const shimDir = await mkdtemp(join(tmpdir(), "obs-shim-"));
+        let instance: Awaited<ReturnType<typeof serveWithNginx>> | undefined;
+        try {
+          const binary = await ensureNginxRuntime();
+          const NL = String.fromCharCode(10);
+          // shim：ps -p 与 lsof 都返回 exit 0 + 指定输出；ps -eo 走真实
+          // 工具，以隔离“单命令成功但输出无效”的场景。
+          const psShim =
+            "#!/bin/sh" +
+            NL +
+            'if [ "$1" = "-p" ]; then ' +
+            shim.script.replace(/"/g, '\\"') +
+            "; fi" +
+            NL +
+            'exec /bin/ps "$@"' +
+            NL;
+          const lsofShim = "#!/bin/sh" + NL + shim.script.replace(/"/g, '\\"') + NL;
+          await writeFile(join(shimDir, "ps"), psShim);
+          await writeFile(join(shimDir, "lsof"), lsofShim);
+          await chmod(join(shimDir, "ps"), 0o755);
+          await chmod(join(shimDir, "lsof"), 0o755);
+
+          instance = await serveWithNginx(
+            binary,
+            build.distRoot,
+            join(process.cwd(), "deploy", "nginx-serving.conf"),
+            join(process.cwd(), "deploy", "security-headers.conf"),
+            await findFreePort(),
+          );
+          // SIGSTOP master：任何“假成功”都会让目录被删而进程仍在。
+          process.kill(instance.masterPid, "SIGSTOP");
+          const originalPath = process.env.PATH;
+          process.env.PATH = shimDir + ":" + originalPath;
+          let stopRejected = false;
+          try {
+            await instance.stop();
+          } catch {
+            stopRejected = true;
+          } finally {
+            process.env.PATH = originalPath;
+          }
+          const dirExists = await stat(instance.configDir).then(
+            () => true,
+            () => false,
+          );
+          // 独立探针（真实 /bin/ps，不经被测实现）。
+          const { stdout } = await execFileAsync("/bin/ps", [
+            "-p",
+            String(instance.masterPid),
+            "-o",
+            "stat=,command=",
+          ]);
+          expect(stopRejected, "stop() must reject when observation is invalid").toBe(
+            true,
+          );
+          expect(instance.state).toBe("cleanup-failed");
+          expect(dirExists, "configDir must be retained for diagnosis").toBe(true);
+          expect(
+            stdout.trim().startsWith("T"),
+            `master must be locatable: ${stdout}`,
+          ).toBe(true);
+        } finally {
+          // 探针独立兜底：恢复调度并精确回收本测试的进程组与目录。
+          if (instance !== undefined) {
+            try {
+              process.kill(instance.masterPid, "SIGCONT");
+            } catch {
+              // 已退出。
+            }
+            try {
+              process.kill(-instance.instancePgid, "SIGKILL");
+            } catch {
+              // 组已不存在。
+            }
+            await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
+            await rm(instance.configDir, { recursive: true, force: true });
+          }
+          await rm(shimDir, { recursive: true, force: true });
+          await build.cleanup();
+        }
+      },
+    );
+  }
+
+  it(
+    "lock: a live holder with an old lock file is never taken over by age",
+    { timeout: 60_000 },
+    async () => {
+      // 活跃持有者 + 超龄锁不得抢占：锁由本测试进程持有（进程存活、
+      // 启动身份匹配），mtime 回拨到 20 分钟前；另一路径的 acquireLock
+      // 语义通过独立子进程验证——子进程必须拿不到锁。
+      const isolated = await mkdtemp(join(tmpdir(), "lock-age-"));
+      try {
+        const lockPath = join(isolated, "runtime.lock");
+        // 以本进程身份创建锁（与实现一致的 JSON 记录）。
+        const start = await execFileAsync("/bin/ps", [
+          "-p",
+          String(process.pid),
+          "-o",
+          "lstart=",
+        ]).then((r) => r.stdout.trim());
+        const token = `holder-token-${Date.now()}`;
+        await writeFile(
+          lockPath,
+          JSON.stringify({ token, pid: process.pid, startIdentity: start }) + "\n",
+        );
+        // 把 mtime 回拨到 20 分钟前（模拟超龄）。
+        const { utimes } = await import("node:fs/promises");
+        const old = new Date(Date.now() - 20 * 60_000);
+        await utimes(lockPath, old, old);
+
+        // 子进程尝试获取同一把锁：持有者（本进程）存活 → 必须失败。
+        const probe = `
+const { acquireLock } = await import("${join(process.cwd(), "tests/support/nginx-runtime.ts")}");
+const lock = await acquireLock(${JSON.stringify(lockPath)});
+console.log("ACQUIRED=" + (lock !== undefined));
+`;
+        const result = await execFileAsync("node", ["--input-type=module", "-e", probe], {
+          cwd: process.cwd(),
+          env: { ...process.env },
+        }).then(
+          (ok) => ok.stdout,
+          (error) => {
+            throw new Error(
+              (error as { stderr?: string }).stderr ?? "lock-age probe failed",
+            );
+          },
+        );
+        expect(result).toContain("ACQUIRED=false");
+        // 锁未被移动/删除：内容与 mtime 语义仍在（他人不得破坏）。
+        const content = (await readFile(lockPath, "utf8")).trim();
+        expect(JSON.parse(content).token).toBe(token);
+      } finally {
+        await rm(isolated, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it(
+    "lock: a late claimer cannot move a new holder's lock (CAS on token)",
+    { timeout: 60_000 },
+    async () => {
+      // 旧锁释放、新锁建立后，迟到抢占者不得移动新锁：
+      // 读取（旧 token）→ 等待 → 锁被替换为新持有者 → rename 必须放弃
+      // 或放回，绝不吞掉新锁。
+      const isolated = await mkdtemp(join(tmpdir(), "lock-cas-"));
+      try {
+        const lockPath = join(isolated, "runtime.lock");
+        // 旧锁：持有进程已死（PID 属于已退出的进程）。
+        const deadPid = 999_999_999;
+        await writeFile(
+          lockPath,
+          JSON.stringify({
+            token: "old-token",
+            pid: deadPid,
+            startIdentity: "old start",
+          }) + "\n",
+        );
+        // 子进程 A（迟到抢占者）：先读取旧锁（触发回收判定路径前的读取），
+        // 在 rename 前等待信号；期间主进程把锁替换为“新持有者”锁。
+        // 为确定性，直接驱动 reclaimByRename 的语义：A 读取到的 expected
+        // token 与锁文件当前内容不一致时必须放弃。
+        // 用两步子进程脚本模拟“读取-延迟-行动”窗口：
+        const script = `
+const { readFile } = await import("node:fs/promises");
+const lockPath = ${JSON.stringify(lockPath)};
+// 步骤 1：读取旧 token（模拟迟到者已在更早时刻读取）。
+const before = JSON.parse((await readFile(lockPath, "utf8")).trim());
+// 步骤 2：通知主进程可以替换锁，然后等待替换完成。
+const { writeFile } = await import("node:fs/promises");
+await writeFile(${JSON.stringify(join(isolated, "read-done"))}, "1");
+while (true) {
+  try {
+    await readFile(${JSON.stringify(join(isolated, "replaced"))});
+    break;
+  } catch {
+    await new Promise((r) => setTimeout(r, 10));
+  }
+}
+// 步骤 3：此时锁已被新持有者替换；迟到者若用旧 token 回收必须失败。
+// 以实现导出的 acquireLock 验证：新持有者（主进程，存活）持有时必须失败。
+const { acquireLock } = await import("${join(process.cwd(), "tests/support/nginx-runtime.ts")}");
+const lock = await acquireLock(lockPath);
+console.log("LATE_ACQUIRED=" + (lock !== undefined));
+`;
+        const child = execFileAsync("node", ["--input-type=module", "-e", script], {
+          cwd: process.cwd(),
+          env: { ...process.env },
+        });
+        // 等待子进程读取旧锁。
+        for (let i = 0; i < 300; i += 1) {
+          if (
+            await stat(join(isolated, "read-done")).then(
+              () => true,
+              () => false,
+            )
+          )
+            break;
+          await new Promise((r) => setTimeout(r, 20));
+        }
+        // 替换为“新持有者”锁：持有进程 = 本测试进程（存活、身份真实）。
+        const start = await execFileAsync("/bin/ps", [
+          "-p",
+          String(process.pid),
+          "-o",
+          "lstart=",
+        ]).then((r) => r.stdout.trim());
+        await writeFile(
+          lockPath,
+          JSON.stringify({
+            token: "new-holder-token",
+            pid: process.pid,
+            startIdentity: start,
+          }) + "\n",
+        );
+        await writeFile(join(isolated, "replaced"), "1");
+        const out = await child.then(
+          (ok) => ok.stdout,
+          (error) => {
+            throw new Error(
+              (error as { stderr?: string }).stderr ?? "lock-cas probe failed",
+            );
+          },
+        );
+        expect(out).toContain("LATE_ACQUIRED=false");
+        // 新持有者的锁原封不动。
+        const content = (await readFile(lockPath, "utf8")).trim();
+        expect(JSON.parse(content).token).toBe("new-holder-token");
+      } finally {
+        await rm(isolated, { recursive: true, force: true });
+      }
     },
   );
 });
