@@ -46,6 +46,19 @@ export const copyDeclaredAssets = async ({
     repository.listTagPages(),
     repository.listTimelines(),
   ]);
+  const buildSha = await resolveBuildSha();
+  const routes = [
+    "/",
+    ...(input.home.schemaVersion === 1
+      ? [input.home.domain.url]
+      : input.home.domains.map((home) => home.domain.url)),
+    ...input.insights.map((insight) => insightRoute(insight.id)),
+    ...input.sources.map((source) => sourceArchiveRoute(source.id)),
+    ...topicOverviews.map((overview) => overview.url),
+    ...topicPages.map((page) => page.url),
+    ...tagPages.map((page) => page.url),
+    ...(timelines.length > 0 ? ["/timeline/"] : []),
+  ].sort();
   const mediaRoot = join(distRoot, "media", "sha256");
   await rm(join(distRoot, "media"), { recursive: true, force: true });
   await mkdir(mediaRoot, { recursive: true });
@@ -61,19 +74,8 @@ export const copyDeclaredAssets = async ({
   const metadata = {
     schemaVersion: 1,
     publicationId: input.publicationId,
-    buildSha: await resolveBuildSha(),
-    routes: [
-      "/",
-      ...(input.home.schemaVersion === 1
-        ? [input.home.domain.url]
-        : input.home.domains.map((home) => home.domain.url)),
-      ...input.insights.map((insight) => insightRoute(insight.id)),
-      ...input.sources.map((source) => sourceArchiveRoute(source.id)),
-      ...topicOverviews.map((overview) => overview.url),
-      ...topicPages.map((page) => page.url),
-      ...tagPages.map((page) => page.url),
-      ...(timelines.length > 0 ? ["/timeline/"] : []),
-    ].sort(),
+    buildSha,
+    routes,
     assets: assets.map((asset) => ({
       url: mediaAssetRoute(asset.sha256, asset.mediaType),
       sha256: asset.sha256,
@@ -83,6 +85,24 @@ export const copyDeclaredAssets = async ({
   await writeFile(
     join(distRoot, "_publication.json"),
     `${JSON.stringify(metadata, null, 2)}\n`,
+    { mode: 0o644 },
+  );
+
+  const release = {
+    schemaVersion: 1,
+    publicationId: input.publicationId,
+    buildSha,
+    generatedAt: new Date().toISOString(),
+  };
+  await mkdir(join(distRoot, "maintenance"), { recursive: true });
+  await writeFile(
+    join(distRoot, "release.json"),
+    `${JSON.stringify(release, null, 2)}\n`,
+    { mode: 0o644 },
+  );
+  await writeFile(
+    join(distRoot, "maintenance", "reminders.json"),
+    `${JSON.stringify({ schemaVersion: 1, reminders: [] }, null, 2)}\n`,
     { mode: 0o644 },
   );
 };

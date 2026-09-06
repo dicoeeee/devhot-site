@@ -47,7 +47,7 @@ interface PublicationManifest {
   readonly files: readonly ManifestFile[];
 }
 
-const BUILDER_VERSION = "0.5.0";
+const BUILDER_VERSION = "0.6.0";
 const contractsRoot = join(process.cwd(), "contracts");
 
 const readJson = async (path: string): Promise<unknown> =>

@@ -1,5 +1,24 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { afterAll, onTestFinished } from "vitest";
+
+// 本模块创建的 fixture 目录统一登记；文件级 afterAll 兜底回收（覆盖
+// beforeAll 中创建、测试内 onTestFinished 无法注册的场景）。
+const createdFixtureRoots: string[] = [];
+afterAll(async () => {
+  const failures: Error[] = [];
+  while (createdFixtureRoots.length > 0) {
+    const root = createdFixtureRoots.pop()!;
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "publication fixture cleanup failed");
+  }
+});
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -44,6 +63,14 @@ interface PublicationFixtureOptions {
   readonly unreferencedAsset?: boolean;
   readonly unreferencedJson?: boolean;
   readonly weeklySourceCounts?: "duplicate" | "mismatch";
+  /**
+   * 正式候选可注入真实品牌资产（如 271×271 CIMC PNG）；
+   * 缺省仍用 1×1 占位图，避免测试夹具携带正式品牌资产。
+   */
+  readonly logoBuffer?: Buffer;
+  /** 正式候选可注入非示例洞察/来源 ID，验证消费方不依赖示例身份。 */
+  readonly insightId?: string;
+  readonly sourceId?: string;
 }
 
 const sha256 = (value: string | Uint8Array): string =>
@@ -53,18 +80,31 @@ export const writePublicationFixture = async (
   options: PublicationFixtureOptions = {},
 ) => {
   const root = await mkdtemp(join(tmpdir(), "devhot-site-input-"));
-  const logo = Buffer.from(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-    "base64",
-  );
+  createdFixtureRoots.push(root);
+  // 测试内创建时注册用例级回收（beforeAll 等钩子中无法注册，由文件级
+  // afterAll 兜底）。
+  try {
+    onTestFinished(async () => {
+      await rm(root, { recursive: true, force: true });
+    });
+  } catch {
+    // 钩子上下文：跳过，交给 afterAll。
+  }
+  const logo =
+    options.logoBuffer ??
+    Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+      "base64",
+    );
   const logoSha256 = sha256(logo);
   const logoPath = `assets/sha256/${logoSha256}.png`;
   const mermaidSvg =
     '<svg xmlns="http://www.w3.org/2000/svg"><text>freeze then validate</text></svg>';
   const mermaidSha256 = sha256(mermaidSvg);
   const mermaidPath = `assets/sha256/${mermaidSha256}.svg`;
-  const insightId = "insight-59498e27cf7aac1a9e4f9a76";
-  const sourceId = "source-59498e27cf7aac1a9e4f9a76";
+  // ID 可注入：正式候选使用非示例 ID，证明下游测试不依赖示例身份。
+  const insightId = options.insightId ?? "insight-59498e27cf7aac1a9e4f9a76";
+  const sourceId = options.sourceId ?? "source-59498e27cf7aac1a9e4f9a76";
   const modelInsightId = "insight-000000000000000000000002";
   const modelSourceId = "source-000000000000000000000002";
   const fallbackSourceId = "source-000000000000000000000003";

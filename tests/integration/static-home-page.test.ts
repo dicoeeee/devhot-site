@@ -3,7 +3,7 @@ import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { runInNewContext } from "node:vm";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
 import { writePublicationFixture } from "../support/publication-fixture";
 import { prepareStaticBuild } from "../support/static-build";
@@ -12,19 +12,48 @@ const execFileAsync = promisify(execFile);
 const projectRoot = process.cwd();
 const astroCli = join(projectRoot, "node_modules", "astro", "bin", "astro.mjs");
 
+// 记录本文件创建的 buildRoot（devhot-site-page-*）与 fixture root
+// （devhot-site-input-*）；teardown 精确回收，清理失败不得静默。
+const createdTempRoots: string[] = [];
+const trackedBuildRoot = async (prepare: () => Promise<string>): Promise<string> => {
+  const root = await prepare();
+  createdTempRoots.push(root);
+  return root;
+};
+
+afterEach(async () => {
+  const failures: Error[] = [];
+  while (createdTempRoots.length > 0) {
+    const root = createdTempRoots.pop()!;
+    try {
+      await rm(root, { recursive: true, force: true });
+    } catch (error) {
+      failures.push(error as Error);
+    }
+  }
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "static-home-page temp cleanup failed");
+  }
+});
+
 describe("static editorial domain home", () => {
   it("builds the repository publication input without assuming its content", async () => {
-    await rm(join(projectRoot, "dist"), { recursive: true, force: true });
-    await execFileAsync(process.execPath, [astroCli, "build"], { cwd: projectRoot });
+    // 在隔离的临时构建目录中构建仓库 site-input，不再删除/改写项目 dist/
+    // （项目 dist 是 final-candidate 验收的对象，测试之间不得互相破坏）。
+    const buildRoot = await trackedBuildRoot(() =>
+      prepareStaticBuild(join(projectRoot, "site-input")),
+    );
+    await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
 
-    const root = await readFile(join(projectRoot, "dist", "index.html"), "utf8");
+    const root = await readFile(join(buildRoot, "dist", "index.html"), "utf8");
 
     expect(root).toMatch(/<meta http-equiv="refresh" content="0;url=\/[^\"]+\/">/);
   });
 
   it("renders the complete editorial behavior from a controlled fixture", async () => {
     const fixture = await writePublicationFixture();
-    const buildRoot = await prepareStaticBuild(fixture.root);
+    createdTempRoots.push(fixture.root);
+    const buildRoot = await trackedBuildRoot(() => prepareStaticBuild(fixture.root));
 
     await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
 
@@ -79,7 +108,8 @@ describe("static editorial domain home", () => {
       legacyHomeContract: true,
       invalidEditorialDomain: true,
     });
-    const buildRoot = await prepareStaticBuild(fixture.root);
+    createdTempRoots.push(fixture.root);
+    const buildRoot = await trackedBuildRoot(() => prepareStaticBuild(fixture.root));
 
     await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
 
@@ -89,7 +119,8 @@ describe("static editorial domain home", () => {
 
   it("keeps the topic entry disabled for a valid editorial input without topics", async () => {
     const fixture = await writePublicationFixture({ omitTopics: true });
-    const buildRoot = await prepareStaticBuild(fixture.root);
+    createdTempRoots.push(fixture.root);
+    const buildRoot = await trackedBuildRoot(() => prepareStaticBuild(fixture.root));
 
     await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
 
@@ -104,7 +135,8 @@ describe("static editorial domain home", () => {
 
   it("blocks page generation when the editorial home is incomplete", async () => {
     const fixture = await writePublicationFixture({ missingWeeklyOverview: true });
-    const buildRoot = await prepareStaticBuild(fixture.root);
+    createdTempRoots.push(fixture.root);
+    const buildRoot = await trackedBuildRoot(() => prepareStaticBuild(fixture.root));
 
     await expect(
       execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot }),
@@ -115,7 +147,8 @@ describe("static editorial domain home", () => {
 
   it("executes equivalent source-coverage controls and restores focus", async () => {
     const fixture = await writePublicationFixture();
-    const buildRoot = await prepareStaticBuild(fixture.root);
+    createdTempRoots.push(fixture.root);
+    const buildRoot = await trackedBuildRoot(() => prepareStaticBuild(fixture.root));
 
     await execFileAsync(process.execPath, [astroCli, "build"], { cwd: buildRoot });
 
