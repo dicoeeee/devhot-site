@@ -1,15 +1,15 @@
 import {
   mkdtemp,
-  mkdir,
   readdir,
   rm,
   stat,
   writeFile,
   chmod,
   readFile,
+  cp,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -18,8 +18,10 @@ import {
   ensureNginxRuntime,
   findFreePort,
   serveWithNginx,
+  NGINX_VERSION,
+  NGINX_TARBALL_SHA256,
 } from "../support/nginx-runtime";
-import { describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 
 const execFileAsync = promisify(execFile) as (
   command: string,
@@ -27,216 +29,213 @@ const execFileAsync = promisify(execFile) as (
   options?: { cwd?: string; env?: NodeJS.ProcessEnv },
 ) => Promise<{ stdout: string; stderr: string }>;
 
-/**
- * 运行时缓存反例回归（P2）：缓存身份必须绑定实际内容与构建配方，
- * 不能绑定缓存路径名称。测试通过受控 TMPDIR 隔离出独立的缓存目录，
- * 逐一验证伪内容不会被接受。
- *
- * 注意：ensureNginxRuntime 的缓存目录由模块加载时的 tmpdir() 决定，
- * 因此本文件用子进程 + 环境变量隔离验证（不污染真实缓存）。
- */
-const runCacheProbe = async (
-  setup: (cacheRoot: string, runtimeDirName: string) => Promise<void>,
-  probeScript: string,
-): Promise<{ stdout: string; stderr: string; code: number }> => {
-  const isolated = await mkdtemp(join(tmpdir(), "devhot-runtime-cache-test-"));
-  try {
-    // 通过模块导出的配方要素推导缓存目录名（版本 + 配方指纹前 16 位）。
-    const runtime = await import("../support/nginx-runtime");
-    const fingerprintInput = JSON.stringify({
-      recipeVersion: 2,
-      nginxVersion: runtime.NGINX_VERSION,
-      tarballSha256: runtime.NGINX_TARBALL_SHA256,
-      configureArgs: ["--without-http_gzip_module"],
-      platform: process.platform,
-      arch: process.arch,
-    });
-    const fingerprint = createHash("sha256").update(fingerprintInput).digest("hex");
-    const runtimeDirName = `devhot-nginx-${runtime.NGINX_VERSION}-${fingerprint.slice(0, 16)}`;
-    await setup(isolated, runtimeDirName);
-    const result = await execFileAsync(
-      "node",
-      ["--input-type=module", "-e", probeScript],
-      {
-        cwd: process.cwd(),
-        env: { ...process.env, TMPDIR: isolated, PATH: process.env.PATH ?? "" },
-      },
-    ).then(
-      (ok) => ({ stdout: ok.stdout, stderr: "", code: 0 }),
-      (error) => ({
-        stdout: (error as { stdout?: string }).stdout ?? "",
-        stderr: (error as { stderr?: string }).stderr ?? "",
-        code: (error as { code?: number }).code ?? 1,
+// 旧实现的真实目录身份固定为 recipe v2；历史锁反例复用同一计算。
+const legacyRuntimeDirName = (): string => {
+  const fingerprint = createHash("sha256")
+    .update(
+      JSON.stringify({
+        recipeVersion: 2,
+        nginxVersion: NGINX_VERSION,
+        tarballSha256: NGINX_TARBALL_SHA256,
+        configureArgs: ["--without-http_gzip_module"],
+        platform: process.platform,
+        arch: process.arch,
       }),
-    );
-    return result;
-  } finally {
-    await rm(isolated, { recursive: true, force: true });
-  }
+    )
+    .digest("hex");
+  return `devhot-nginx-${NGINX_VERSION}-${fingerprint.slice(0, 16)}`;
 };
 
-/** 探针脚本：在隔离 TMPDIR 中调用 ensureNginxRuntime 并输出结论。 */
-const probeSource = `
-import { ensureNginxRuntime } from "./tests/support/nginx-runtime.ts";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-import { readFile } from "node:fs/promises";
-import { createHash } from "node:crypto";
-const execFileAsync = promisify(execFile);
-try {
-  const resolved = await ensureNginxRuntime();
-  // 在隔离 TMPDIR 仍然存在时验证产物是真实 nginx：解析 -V 的
-  // stdout+stderr，精确校验版本行、--prefix 与 configure 参数——
-  // 不是只看退出码（"exit 0" 伪脚本无法伪造这些内容）。
-  let combined = "";
-  try {
-    const ok = await execFileAsync(resolved, ["-V"]);
-    combined = (ok.stdout || "") + (ok.stderr || "");
-  } catch (error) {
-    combined = ((error && error.stdout) || "") + ((error && error.stderr) || "");
-  }
-  const versionOk =
-    combined.includes("nginx version: nginx/1.30.4") &&
-    combined.includes("--prefix=") &&
-    combined.includes("--without-http_gzip_module");
-  // 同时校验 marker 与二进制实际指纹一致。
-  let markerOk = false;
-  try {
-    const marker = JSON.parse(
-      await readFile(
-        resolved.replace("/sbin/nginx", "/.install-complete"),
-        "utf8",
-      ),
+describe("pinned nginx runtime isolation and integrity", () => {
+  describe("active runtime validation", () => {
+    let binary: string;
+    let root: string;
+    let snapshot: string;
+    let markerText: string;
+    let originalSha: string;
+
+    beforeAll(async () => {
+      binary = await ensureNginxRuntime();
+      root = dirname(dirname(binary));
+      snapshot = await mkdtemp(join(tmpdir(), "devhot-runtime-snapshot-"));
+      await cp(root, join(snapshot, "runtime"), { recursive: true });
+      markerText = await readFile(join(root, ".install-complete"), "utf8");
+      originalSha = createHash("sha256")
+        .update(await readFile(binary))
+        .digest("hex");
+    }, 300_000);
+
+    afterAll(async () => {
+      if (snapshot !== undefined) await rm(snapshot, { recursive: true, force: true });
+    });
+
+    const assertValidated = async (): Promise<void> => {
+      expect(await ensureNginxRuntime()).toBe(binary);
+      expect(await readFile(join(root, ".install-complete"), "utf8")).toBe(markerText);
+      expect(
+        createHash("sha256")
+          .update(await readFile(binary))
+          .digest("hex"),
+      ).toBe(originalSha);
+      // execFileAsync 的非零退出会直接失败；独立断言精确版本行与 prefix。
+      const result = await execFileAsync(binary, ["-V"]);
+      const lines = (result.stdout + "\n" + result.stderr)
+        .split("\n")
+        .map((line) => line.trim());
+      expect(lines).toContain("nginx version: nginx/" + NGINX_VERSION);
+      const configure = lines.find((line) => line.startsWith("configure arguments:"));
+      const args = configure?.slice("configure arguments:".length).trim().split(/\s+/);
+      expect(args).toContain("--prefix=" + root);
+      expect(args).toContain("--without-http_gzip_module");
+    };
+
+    // 真实构建一次。对当前运行时逐项篡改，阻断重新下载以证明 ensure
+    // 已拒绝当前内容并进入重建；随后还原本测试快照，独立验证完整证据。
+    // 自动重新编译恢复另由下方 reswap 黑盒反例覆盖。
+    const expectRejected = async (mutate: () => Promise<void>): Promise<void> => {
+      const denied = new Error("controlled rebuild download failure");
+      const download = vi.spyOn(globalThis, "fetch").mockRejectedValue(denied);
+      try {
+        await mutate();
+        await expect(ensureNginxRuntime()).rejects.toBe(denied);
+        expect(download).toHaveBeenCalledTimes(1);
+        // 在进程退出前就确认失败构建已经删除整个自有根目录。
+        await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        download.mockRestore();
+        await rm(root, { recursive: true, force: true });
+        await cp(join(snapshot, "runtime"), root, { recursive: true });
+      }
+      await assertValidated();
+    };
+
+    it("accepts the real runtime with complete evidence", assertValidated);
+
+    it("rejects an active runtime with a missing marker", async () => {
+      await expectRejected(() => rm(join(root, ".install-complete")));
+    });
+
+    it.each(["", "{", "null"])("rejects malformed active marker %j", async (text) => {
+      await expectRejected(() => writeFile(join(root, ".install-complete"), text));
+    });
+
+    it.each([
+      ["schemaVersion", 99],
+      ["nginxVersion", "0.0.0"],
+      ["tarballSha256", "0".repeat(64)],
+      ["recipeFingerprint", "0".repeat(64)],
+      ["binarySha256", "0".repeat(64)],
+    ])("rejects changed active marker field %s", async (field, value) => {
+      await expectRejected(async () => {
+        const marker = JSON.parse(markerText) as Record<string, unknown>;
+        marker[String(field)] = value;
+        await writeFile(join(root, ".install-complete"), JSON.stringify(marker));
+      });
+    });
+
+    it.each([
+      "schemaVersion",
+      "nginxVersion",
+      "tarballSha256",
+      "recipeFingerprint",
+      "binarySha256",
+    ])("rejects missing active marker field %s", async (field) => {
+      await expectRejected(async () => {
+        const marker = JSON.parse(markerText) as Record<string, unknown>;
+        delete marker[field];
+        await writeFile(join(root, ".install-complete"), JSON.stringify(marker));
+      });
+    });
+
+    it("rejects an active binary whose bytes disagree with its marker", async () => {
+      await expectRejected(() => writeFile(binary, "#!/bin/sh\nexit 0\n"));
+    });
+
+    it.each([
+      {
+        name: "correct output but exit 42",
+        code: 42,
+        versionSuffix: "",
+        prefixSuffix: "",
+        args: "--without-http_gzip_module",
+      },
+      {
+        name: "wrong prefix with matching binary SHA",
+        code: 0,
+        versionSuffix: "",
+        prefixSuffix: "-wrong",
+        args: "--without-http_gzip_module",
+      },
+      {
+        name: "version prefix lookalike",
+        code: 0,
+        versionSuffix: "-wrong",
+        prefixSuffix: "",
+        args: "--without-http_gzip_module",
+      },
+      {
+        name: "missing configure argument",
+        code: 0,
+        versionSuffix: "",
+        prefixSuffix: "",
+        args: "",
+      },
+      {
+        name: "configure argument prefix lookalike",
+        code: 0,
+        versionSuffix: "",
+        prefixSuffix: "",
+        args: "--without-http_gzip_module-wrong",
+      },
+    ])(
+      "rejects $name in the active runtime",
+      async ({ code, versionSuffix, prefixSuffix, args }) => {
+        await expectRejected(async () => {
+          const output =
+            "nginx version: nginx/" +
+            NGINX_VERSION +
+            versionSuffix +
+            "\n" +
+            "configure arguments: --prefix=" +
+            root +
+            prefixSuffix +
+            " " +
+            args;
+          const quoted = "'" + output.replaceAll("'", "'\\''") + "'";
+          await writeFile(
+            binary,
+            "#!/bin/sh\nprintf '%s\\n' " + quoted + "\nexit " + code + "\n",
+          );
+          await chmod(binary, 0o755);
+          const marker = JSON.parse(markerText) as Record<string, unknown>;
+          marker.binarySha256 = createHash("sha256")
+            .update(await readFile(binary))
+            .digest("hex");
+          await writeFile(join(root, ".install-complete"), JSON.stringify(marker));
+        });
+      },
     );
-    const actual = createHash("sha256")
-      .update(await readFile(resolved))
-      .digest("hex");
-    markerOk = marker.binarySha256 === actual && marker.recipeFingerprint && marker.schemaVersion === 2;
-  } catch {
-    markerOk = false;
-  }
-  console.log("RESOLVED=" + resolved);
-  console.log("VERSION_OK=" + versionOk);
-  console.log("MARKER_OK=" + markerOk);
-} catch (error) {
-  console.log("THREW=" + (error && error.message ? error.message.slice(0, 120) : "unknown"));
-}
-`;
 
-describe("pinned nginx runtime cache integrity", () => {
-  it(
-    "rejects a fake binary at the expected cache path (exit 0 stub)",
-    { timeout: 600_000 },
-    async () => {
-      const result = await runCacheProbe(async (root, dirName) => {
-        const sbin = join(root, dirName, "sbin");
-        await mkdir(sbin, { recursive: true });
-        const fake = join(sbin, "nginx");
-        await writeFile(fake, "#!/bin/sh\nexit 0\n");
-        await chmod(fake, 0o755);
-      }, probeSource);
-      // 伪二进制不被接受：要么触发重建（RESOLVED 指向真实二进制并验证
-      // 通过），要么失败；绝不能把伪路径当作固定运行时直接返回。
-      const resolved = result.stdout.match(/RESOLVED=(.*)/)?.[1] ?? "";
-      expect(resolved.endsWith("sbin/nginx")).toBe(true);
-      // 伪缓存必须被拒绝并重建：产物在探针内验证为真实 nginx。
-      expect(result.stdout).toContain("VERSION_OK=true");
-      expect(result.stdout).toContain("MARKER_OK=true");
-    },
-  );
+    it("removes the whole owned root when a downloaded tarball fails integrity", async () => {
+      const download = vi
+        .spyOn(globalThis, "fetch")
+        .mockResolvedValue(new Response("corrupt tarball"));
+      try {
+        await rm(join(root, ".install-complete"));
+        await expect(ensureNginxRuntime()).rejects.toThrow("tarball sha256 mismatch");
+        expect(download).toHaveBeenCalledTimes(1);
+        await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
+      } finally {
+        download.mockRestore();
+        await rm(root, { recursive: true, force: true });
+        await cp(join(snapshot, "runtime"), root, { recursive: true });
+      }
+      await assertValidated();
+    });
+  });
 
   it(
-    "rejects a cache with a missing marker (half-installed state)",
-    { timeout: 600_000 },
-    async () => {
-      const result = await runCacheProbe(async (root, dirName) => {
-        const sbin = join(root, dirName, "sbin");
-        await mkdir(sbin, { recursive: true });
-        // 半安装：真实系统 nginx 也无法通过 marker 校验（无 marker 即拒绝）。
-        const realNginx =
-          "/var/folders/16/kt87dmvx3tz0zmfggqwzlyx40000gn/T/devhot-nginx-1.30.4-4261dc90e9e4/sbin/nginx";
-        const statResult = await stat(realNginx).then(
-          () => true,
-          () => false,
-        );
-        if (statResult) {
-          await execFileAsync("cp", [realNginx, join(sbin, "nginx")]);
-          await chmod(join(sbin, "nginx"), 0o755);
-        } else {
-          await writeFile(join(sbin, "nginx"), "#!/bin/sh\nexit 0\n");
-          await chmod(join(sbin, "nginx"), 0o755);
-        }
-        // 不写 marker：半安装状态。
-      }, probeSource);
-      const resolved = result.stdout.match(/RESOLVED=(.*)/)?.[1] ?? "";
-      // 无 marker：触发重建；绝不直接接受无 marker 的缓存。
-      expect(resolved.endsWith("sbin/nginx")).toBe(true);
-      expect(result.stdout).toContain("VERSION_OK=true");
-      expect(result.stdout).toContain("MARKER_OK=true");
-    },
-  );
-
-  it(
-    "rejects a cache whose marker disagrees with the actual binary fingerprint",
-    { timeout: 600_000 },
-    async () => {
-      const result = await runCacheProbe(async (root, dirName) => {
-        const sbin = join(root, dirName, "sbin");
-        await mkdir(sbin, { recursive: true });
-        await writeFile(join(sbin, "nginx"), "#!/bin/sh\nexit 0\n");
-        await chmod(join(sbin, "nginx"), 0o755);
-        // marker 指纹与实际内容不符。
-        await writeFile(
-          join(root, dirName, ".install-complete"),
-          JSON.stringify({
-            schemaVersion: 2,
-            nginxVersion: "1.30.4",
-            tarballSha256:
-              "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b",
-            recipeFingerprint: "deadbeefdeadbeefdeadbeefdeadbeef",
-            binarySha256: "0".repeat(64),
-          }),
-        );
-      }, probeSource);
-      const resolved = result.stdout.match(/RESOLVED=(.*)/)?.[1] ?? "";
-      expect(resolved.endsWith("sbin/nginx")).toBe(true);
-      expect(result.stdout).toContain("VERSION_OK=true");
-      expect(result.stdout).toContain("MARKER_OK=true");
-    },
-  );
-
-  it(
-    "a marker with a different recipe fingerprint is not the current runtime",
-    { timeout: 600_000 },
-    async () => {
-      // 配方变化（如 configure 参数不同）产生不同指纹：同目录名不会被
-      // 匹配——本测试验证“同名目录 + 异配方 marker”不被当作当前运行时。
-      const result = await runCacheProbe(async (root, dirName) => {
-        const sbin = join(root, dirName, "sbin");
-        await mkdir(sbin, { recursive: true });
-        await writeFile(join(sbin, "nginx"), "#!/bin/sh\nexit 0\n");
-        await chmod(join(sbin, "nginx"), 0o755);
-        await writeFile(
-          join(root, dirName, ".install-complete"),
-          JSON.stringify({
-            schemaVersion: 2,
-            nginxVersion: "1.30.4",
-            tarballSha256:
-              "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b",
-            recipeFingerprint: "different-recipe-fingerprint-value",
-            binarySha256: "0".repeat(64),
-          }),
-        );
-      }, probeSource);
-      const resolved = result.stdout.match(/RESOLVED=(.*)/)?.[1] ?? "";
-      expect(resolved.endsWith("sbin/nginx")).toBe(true);
-      expect(result.stdout).toContain("VERSION_OK=true");
-      expect(result.stdout).toContain("MARKER_OK=true");
-    },
-  );
-
-  it(
-    "in-process concurrent prepare calls converge on one validated cache",
+    "in-process concurrent prepare calls converge on one validated runtime",
     { timeout: 300_000 },
     async () => {
       // 同进程内并发：合并为一次 in-flight 准备，产物通过内容校验。
@@ -275,33 +274,41 @@ console.log("CONVERGED=" + a);
   );
 
   it(
-    "two independent processes racing on the same cache yield one build, no residue",
+    "two independent processes build in isolated roots without locks or residue",
     { timeout: 600_000 },
     async () => {
-      // 两个独立 Node 进程 + 同步屏障（就绪文件 + 定时同时起跑）竞争
-      // 同一缓存目标：锁必须互斥，最终只有一份完整 marker/二进制，且
-      // 锁文件被清理（无残留、无相互删除）。
+      // 两个独立 Node 进程同步起跑。每个进程只写自己的唯一运行时根，
+      // 因而不需要共享锁、陈旧回收或跨进程 CAS。
       const isolated = await mkdtemp(join(tmpdir(), "devhot-runtime-race-"));
       try {
         const script = `
 import { ensureNginxRuntime } from "./tests/support/nginx-runtime.ts";
-import { stat, writeFile } from "node:fs/promises";
+import { stat, writeFile, readFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 const barrier = process.env.BARRIER_PATH;
 // 就绪屏障：各自写自己的 ready 文件，等待两份都出现后同时起跑。
 await writeFile(barrier + ".ready", "1");
 const other = process.env.OTHER_BARRIER;
+let otherReady = false;
 for (let i = 0; i < 600; i += 1) {
   try {
     await stat(other + ".ready");
+    otherReady = true;
     break;
   } catch {
     await new Promise((r) => setTimeout(r, 50));
   }
 }
+if (!otherReady) throw new Error("other runtime process never reached the barrier");
 const startAt = Date.now() + 150;
 while (Date.now() < startAt) await new Promise((r) => setTimeout(r, 5));
 const resolved = await ensureNginxRuntime();
 console.log("RACE_DONE=" + resolved);
+const marker = JSON.parse(
+  await readFile(resolved.replace("/sbin/nginx", "/.install-complete"), "utf8"),
+);
+const actual = createHash("sha256").update(await readFile(resolved)).digest("hex");
+console.log("RACE_VALID=" + (marker.binarySha256 === actual));
 `;
         const runChild = (ordinal: string) =>
           execFileAsync("node", ["--input-type=module", "-e", script], {
@@ -320,25 +327,32 @@ console.log("RACE_DONE=" + resolved);
               );
             },
           );
-        const [first, second] = await Promise.all([runChild("1"), runChild("2")]);
-        const done1 = first.match(/RACE_DONE=(.*)/)?.[1] ?? "";
-        const done2 = second.match(/RACE_DONE=(.*)/)?.[1] ?? "";
-        // 两个进程都拿到同一路径。
+        // 即使某一子进程失败，也等待另一个退出后才能删除共享测试目录。
+        const results = await Promise.allSettled([runChild("1"), runChild("2")]);
+        const [first, second] = results.map((result) => {
+          if (result.status === "rejected") throw result.reason;
+          return result.value;
+        });
+        const done1 = first!.match(/RACE_DONE=(.*)/)?.[1] ?? "";
+        const done2 = second!.match(/RACE_DONE=(.*)/)?.[1] ?? "";
+        // 两个进程各自拿到内容完整、互不共享的路径。
         expect(done1.endsWith("sbin/nginx")).toBe(true);
-        expect(done1).toBe(done2);
-        // 独立复核：marker 与二进制实际指纹一致（只有一份完整产物）。
-        const runtimeDir = done1.replace("/sbin/nginx", "");
-        const marker = JSON.parse(
-          await readFile(join(runtimeDir, ".install-complete"), "utf8"),
-        ) as { binarySha256: string };
-        const actual = createHash("sha256")
-          .update(await readFile(done1))
-          .digest("hex");
-        expect(marker.binarySha256).toBe(actual);
-        // 无锁残留、无 stale 残留。
-        await expect(stat(`${runtimeDir}.lock`)).rejects.toThrow();
+        expect(done2.endsWith("sbin/nginx")).toBe(true);
+        expect(done1).not.toBe(done2);
+        expect(first).toContain("RACE_VALID=true");
+        expect(second).toContain("RACE_VALID=true");
+        // 子进程退出会清理自己的运行时；无 lock/stale 残留。
+        await expect(stat(dirname(dirname(done1)))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
+        await expect(stat(dirname(dirname(done2)))).rejects.toMatchObject({
+          code: "ENOENT",
+        });
         const leftovers = (await readdir(isolated)).filter(
-          (entry) => entry.includes(".lock") || entry.includes("stale-"),
+          (entry) =>
+            entry.startsWith("devhot-nginx-") ||
+            entry.includes(".lock") ||
+            entry.includes("stale-"),
         );
         expect(leftovers).toEqual([]);
       } finally {
@@ -348,7 +362,7 @@ console.log("RACE_DONE=" + resolved);
   );
 
   it(
-    "re-verifies the cache on every call after a successful prepare",
+    "re-verifies the process-owned runtime on every call after preparation",
     { timeout: 300_000 },
     async () => {
       // 永久信任反例：第一次 ensure 成功后，把隔离缓存中的二进制替换为
@@ -369,16 +383,12 @@ await chmod(first, 0o755);
 const second = await ensureNginxRuntime();
 console.log("SECOND=" + second);
 // 第二次结果必须再次通过内容验证（-V 解析版本与 prefix）。
-let combined = "";
-try {
-  const ok = await execFileAsync(second, ["-V"]);
-  combined = (ok.stdout || "") + (ok.stderr || "");
-} catch (error) {
-  combined = ((error && error.stdout) || "") + ((error && error.stderr) || "");
-}
+const ok = await execFileAsync(second, ["-V"]);
+const lines = ((ok.stdout || "") + "\\n" + (ok.stderr || "")).split("\\n").map((line) => line.trim());
+const args = lines.find((line) => line.startsWith("configure arguments:"))?.slice("configure arguments:".length).trim().split(/\\s+/);
 console.log(
   "SECOND_REAL=" +
-    (combined.includes("nginx version: nginx/1.30.4") && combined.includes("--prefix=")),
+    (lines.includes("nginx version: nginx/1.30.4") && args?.includes("--prefix=" + second.replace("/sbin/nginx", ""))),
 );
 `;
         const result = await execFileAsync(
@@ -420,6 +430,112 @@ console.log(
         .update(await readFile(resolved))
         .digest("hex");
       expect(marker.binarySha256).toBe(actual);
+    },
+  );
+});
+
+describe("runtime cleanup failure reporting", () => {
+  it.each([
+    { mode: "async", initialCode: 0, expectedCode: 0 },
+    { mode: "exit", initialCode: 0, expectedCode: 1 },
+    { mode: "exit", initialCode: 17, expectedCode: 17 },
+  ])(
+    "reports $mode cleanup failure with initial exit code $initialCode",
+    async ({ mode, initialCode, expectedCode }) => {
+      const isolated = await mkdtemp(join(tmpdir(), "devhot-runtime-cleanup-failure-"));
+      try {
+        // 仅在子进程替换内置 fs 调用，故障限定为该进程的精确自有根目录。
+        // 下载在创建 src 后立即失败，不编译、不启动 Nginx。
+        const script = `
+import fs from "node:fs";
+import fsp from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
+import { join } from "node:path";
+const mode = process.env.PROBE_MODE;
+const isolated = process.env.TMPDIR;
+const realRm = fsp.rm;
+const realRmSync = fs.rmSync;
+const buildError = new Error("controlled download failure");
+const cleanupError = new Error("controlled cleanup failure");
+let root;
+globalThis.fetch = async () => {
+  const entries = (await fsp.readdir(isolated)).filter((name) => name.startsWith("devhot-nginx-"));
+  if (entries.length !== 1) throw new Error("expected one process-owned root");
+  root = join(isolated, entries[0]);
+  throw buildError;
+};
+if (mode === "async") {
+  fsp.rm = async (path, options) => {
+    if (root !== undefined && path === root) throw cleanupError;
+    return realRm(path, options);
+  };
+  syncBuiltinESMExports();
+}
+const { ensureNginxRuntime } = await import("./tests/support/nginx-runtime.ts");
+let failure;
+try { await ensureNginxRuntime(); } catch (error) { failure = error; }
+if (root === undefined) throw new Error("download failure was not reached");
+if (mode === "async") {
+  console.log(JSON.stringify({
+    aggregate: failure instanceof AggregateError,
+    preservesBoth: failure?.errors?.[0] === buildError && failure?.errors?.[1] === cleanupError,
+    rootRetained: (await fsp.stat(root)).isDirectory(),
+  }));
+  fsp.rm = realRm;
+  syncBuiltinESMExports();
+  await realRm(root, { recursive: true, force: true });
+} else {
+  if (failure !== buildError) throw new Error("unexpected build failure");
+  // 失败构建正常清理后，重建本进程自有空目录以单独触发 exit 清理故障。
+  await fsp.mkdir(root);
+  fs.rmSync = (path, options) => {
+    if (path === root) throw cleanupError;
+    return realRmSync(path, options);
+  };
+  syncBuiltinESMExports();
+  console.log(JSON.stringify({ root }));
+  process.exitCode = Number(process.env.INITIAL_EXIT_CODE);
+}
+`;
+        const result = await execFileAsync(
+          "node",
+          ["--input-type=module", "-e", script],
+          {
+            cwd: process.cwd(),
+            env: {
+              ...process.env,
+              TMPDIR: isolated,
+              PROBE_MODE: mode,
+              INITIAL_EXIT_CODE: String(initialCode),
+            },
+          },
+        ).then(
+          (ok) => ({ ...ok, code: 0 }),
+          (error: { stdout: string; stderr: string; code: number }) => error,
+        );
+        expect(result.code).toBe(expectedCode);
+        const evidence = JSON.parse(result.stdout.trim()) as {
+          aggregate?: boolean;
+          preservesBoth?: boolean;
+          rootRetained?: boolean;
+          root?: string;
+        };
+        if (mode === "async") {
+          expect(evidence).toEqual({
+            aggregate: true,
+            preservesBoth: true,
+            rootRetained: true,
+          });
+          expect(await readdir(isolated)).toEqual([]);
+        } else {
+          expect(result.stderr).toContain("failed to remove pinned nginx runtime");
+          expect(result.stderr).toContain("controlled cleanup failure");
+          expect(dirname(evidence.root!)).toBe(isolated);
+          expect((await stat(evidence.root!)).isDirectory()).toBe(true);
+        }
+      } finally {
+        await rm(isolated, { recursive: true, force: true });
+      }
     },
   );
 });
@@ -534,41 +650,26 @@ describe("observer output validation (exit-0 ≠ valid observation)", () => {
   }
 
   it(
-    "lock: a live holder with an old lock file is never taken over by age",
-    { timeout: 60_000 },
+    "an empty legacy lock cannot block or be modified by runtime preparation",
+    { timeout: 300_000 },
     async () => {
-      // 活跃持有者 + 超龄锁不得抢占：锁由本测试进程持有（进程存活、
-      // 启动身份匹配），mtime 回拨到 20 分钟前；另一路径的 acquireLock
-      // 语义通过独立子进程验证——子进程必须拿不到锁。
+      // 旧实现若在 O_EXCL 创建后、写 JSON 前崩溃，会留下 0 字节锁。
+      // 新实现不读取或回收它，因此它不能阻断新进程的唯一目录构建。
       const isolated = await mkdtemp(join(tmpdir(), "lock-age-"));
       try {
-        const lockPath = join(isolated, "runtime.lock");
-        // 以本进程身份创建锁（与实现一致的 JSON 记录）。
-        const start = await execFileAsync("/bin/ps", [
-          "-p",
-          String(process.pid),
-          "-o",
-          "lstart=",
-        ]).then((r) => r.stdout.trim());
-        const token = `holder-token-${Date.now()}`;
-        await writeFile(
-          lockPath,
-          JSON.stringify({ token, pid: process.pid, startIdentity: start }) + "\n",
-        );
-        // 把 mtime 回拨到 20 分钟前（模拟超龄）。
-        const { utimes } = await import("node:fs/promises");
-        const old = new Date(Date.now() - 20 * 60_000);
-        await utimes(lockPath, old, old);
+        const lockPath = join(isolated, `${legacyRuntimeDirName()}.lock`);
+        await writeFile(lockPath, "");
+        const before = await stat(lockPath);
 
-        // 子进程尝试获取同一把锁：持有者（本进程）存活 → 必须失败。
+        // 子进程准备自己的固定运行时，不访问这把历史锁。
         const probe = `
-const { acquireLock } = await import("${join(process.cwd(), "tests/support/nginx-runtime.ts")}");
-const lock = await acquireLock(${JSON.stringify(lockPath)});
-console.log("ACQUIRED=" + (lock !== undefined));
+const { ensureNginxRuntime } = await import("${join(process.cwd(), "tests/support/nginx-runtime.ts")}");
+const binary = await ensureNginxRuntime();
+console.log("READY=" + binary.endsWith("/sbin/nginx"));
 `;
         const result = await execFileAsync("node", ["--input-type=module", "-e", probe], {
           cwd: process.cwd(),
-          env: { ...process.env },
+          env: { ...process.env, TMPDIR: isolated },
         }).then(
           (ok) => ok.stdout,
           (error) => {
@@ -577,10 +678,15 @@ console.log("ACQUIRED=" + (lock !== undefined));
             );
           },
         );
-        expect(result).toContain("ACQUIRED=false");
-        // 锁未被移动/删除：内容与 mtime 语义仍在（他人不得破坏）。
-        const content = (await readFile(lockPath, "utf8")).trim();
-        expect(JSON.parse(content).token).toBe(token);
+        expect(result).toContain("READY=true");
+        // 历史锁未被移动、覆盖或删除。
+        expect(await readFile(lockPath, "utf8")).toBe("");
+        const after = await stat(lockPath);
+        expect([after.ino, after.mtimeMs, after.size]).toEqual([
+          before.ino,
+          before.mtimeMs,
+          before.size,
+        ]);
       } finally {
         await rm(isolated, { recursive: true, force: true });
       }
@@ -588,15 +694,15 @@ console.log("ACQUIRED=" + (lock !== undefined));
   );
 
   it(
-    "lock: a late claimer cannot move a new holder's lock (CAS on token)",
-    { timeout: 60_000 },
+    "legacy lock replacement remains untouched during concurrent preparation",
+    { timeout: 300_000 },
     async () => {
-      // 旧锁释放、新锁建立后，迟到抢占者不得移动新锁：
-      // 读取（旧 token）→ 等待 → 锁被替换为新持有者 → rename 必须放弃
-      // 或放回，绝不吞掉新锁。
+      // 即使历史锁在并发窗口内被替换，新运行时准备也不参与这套旧锁
+      // 协议，因此不会移动或删除任何一方的文件。
       const isolated = await mkdtemp(join(tmpdir(), "lock-cas-"));
+      let child: ReturnType<typeof execFileAsync> | undefined;
       try {
-        const lockPath = join(isolated, "runtime.lock");
+        const lockPath = join(isolated, `${legacyRuntimeDirName()}.lock`);
         // 旧锁：持有进程已死（PID 属于已退出的进程）。
         const deadPid = 999_999_999;
         await writeFile(
@@ -607,11 +713,7 @@ console.log("ACQUIRED=" + (lock !== undefined));
             startIdentity: "old start",
           }) + "\n",
         );
-        // 子进程 A（迟到抢占者）：先读取旧锁（触发回收判定路径前的读取），
-        // 在 rename 前等待信号；期间主进程把锁替换为“新持有者”锁。
-        // 为确定性，直接驱动 reclaimByRename 的语义：A 读取到的 expected
-        // token 与锁文件当前内容不一致时必须放弃。
-        // 用两步子进程脚本模拟“读取-延迟-行动”窗口：
+        // 子进程先观察旧文件，再等待主进程替换，随后独立准备运行时。
         const script = `
 const { readFile } = await import("node:fs/promises");
 const lockPath = ${JSON.stringify(lockPath)};
@@ -620,35 +722,43 @@ const before = JSON.parse((await readFile(lockPath, "utf8")).trim());
 // 步骤 2：通知主进程可以替换锁，然后等待替换完成。
 const { writeFile } = await import("node:fs/promises");
 await writeFile(${JSON.stringify(join(isolated, "read-done"))}, "1");
-while (true) {
+let replaced = false;
+for (let attempt = 0; attempt < 600; attempt += 1) {
   try {
     await readFile(${JSON.stringify(join(isolated, "replaced"))});
+    replaced = true;
     break;
   } catch {
     await new Promise((r) => setTimeout(r, 10));
   }
 }
-// 步骤 3：此时锁已被新持有者替换；迟到者若用旧 token 回收必须失败。
-// 以实现导出的 acquireLock 验证：新持有者（主进程，存活）持有时必须失败。
-const { acquireLock } = await import("${join(process.cwd(), "tests/support/nginx-runtime.ts")}");
-const lock = await acquireLock(lockPath);
-console.log("LATE_ACQUIRED=" + (lock !== undefined));
+if (!replaced) throw new Error("legacy lock replacement barrier timed out");
+// 步骤 3：新实现不访问 lockPath，只准备进程唯一运行时。
+const { ensureNginxRuntime } = await import("${join(process.cwd(), "tests/support/nginx-runtime.ts")}");
+const binary = await ensureNginxRuntime();
+console.log("LATE_READY=" + binary.endsWith("/sbin/nginx"));
 `;
-        const child = execFileAsync("node", ["--input-type=module", "-e", script], {
+        child = execFileAsync("node", ["--input-type=module", "-e", script], {
           cwd: process.cwd(),
-          env: { ...process.env },
+          env: { ...process.env, TMPDIR: isolated },
         });
+        // 等待屏障期间也接收早退错误，统一在下方 await/finally 处理。
+        void child.catch(() => {});
         // 等待子进程读取旧锁。
+        let childReadDone = false;
         for (let i = 0; i < 300; i += 1) {
           if (
             await stat(join(isolated, "read-done")).then(
               () => true,
               () => false,
             )
-          )
+          ) {
+            childReadDone = true;
             break;
+          }
           await new Promise((r) => setTimeout(r, 20));
         }
+        if (!childReadDone) throw new Error("legacy lock read barrier timed out");
         // 替换为“新持有者”锁：持有进程 = 本测试进程（存活、身份真实）。
         const start = await execFileAsync("/bin/ps", [
           "-p",
@@ -656,14 +766,18 @@ console.log("LATE_ACQUIRED=" + (lock !== undefined));
           "-o",
           "lstart=",
         ]).then((r) => r.stdout.trim());
+        const replacementPath = `${lockPath}.replacement`;
         await writeFile(
-          lockPath,
+          replacementPath,
           JSON.stringify({
             token: "new-holder-token",
             pid: process.pid,
             startIdentity: start,
           }) + "\n",
         );
+        const { rename } = await import("node:fs/promises");
+        await rename(replacementPath, lockPath);
+        const replacement = await stat(lockPath);
         await writeFile(join(isolated, "replaced"), "1");
         const out = await child.then(
           (ok) => ok.stdout,
@@ -673,11 +787,18 @@ console.log("LATE_ACQUIRED=" + (lock !== undefined));
             );
           },
         );
-        expect(out).toContain("LATE_ACQUIRED=false");
+        expect(out).toContain("LATE_READY=true");
         // 新持有者的锁原封不动。
         const content = (await readFile(lockPath, "utf8")).trim();
         expect(JSON.parse(content).token).toBe("new-holder-token");
+        const after = await stat(lockPath);
+        expect([after.ino, after.mtimeMs, after.size]).toEqual([
+          replacement.ino,
+          replacement.mtimeMs,
+          replacement.size,
+        ]);
       } finally {
+        await child?.catch(() => {});
         await rm(isolated, { recursive: true, force: true });
       }
     },

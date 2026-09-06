@@ -1,6 +1,7 @@
 import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
+import { rmSync } from "node:fs";
 import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -8,8 +9,8 @@ import { dirname, join } from "node:path";
 // #78 固定 Nginx 运行时：真实 HTTP 验证必须使用固定版本，不允许用配置文本
 // 扫描或手工注入安全头的 Node 测试服务器替代。
 // - 版本：nginx 1.30.4（官方稳定行）
-// - 完整性：tarball SHA-256 固定；签名文件随缓存一并保存供人工复核
-// - 构建：源码 ./configure + make，仅静态站点所需模块，安装到本机缓存目录
+// - 完整性：下载源码的 tarball SHA-256 固定，安装后记录二进制指纹
+// - 构建：源码 ./configure + make，安装到本进程的唯一临时目录
 export const NGINX_VERSION = "1.30.4";
 export const NGINX_TARBALL_SHA256 =
   "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b";
@@ -24,7 +25,7 @@ const execFileAsync = promisify(execFile) as (
 // 路径名。任何配方要素变化（版本、tarball 指纹、configure 参数、配方
 // 版本、平台、架构）都会产生新的缓存目录身份，旧缓存不会被当作当前
 // 固定运行时复用。
-const RUNTIME_RECIPE_VERSION = 2;
+const RUNTIME_RECIPE_VERSION = 3;
 const NGINX_CONFIGURE_ARGS = [
   // rewrite 模块必须启用：error_page/内部重定向按状态改写缓存策略
   // 依赖它；此前为最小化构建而排除。
@@ -42,12 +43,29 @@ const recipeFingerprint = createHash("sha256")
     }),
   )
   .digest("hex");
+// 运行时只在当前 Node 进程内共享。PID + 随机会话身份确保不同测试进程
+// 永远不会共同写一个目录，因此不需要 PID 探测、陈旧锁回收或跨进程
+// CAS。构建失败/内容被篡改时，只重建当前进程拥有的精确目录。
 const runtimeRoot = join(
   tmpdir(),
-  `devhot-nginx-${NGINX_VERSION}-${recipeFingerprint.slice(0, 16)}`,
+  `devhot-nginx-${NGINX_VERSION}-${recipeFingerprint.slice(0, 16)}-${process.pid}-${randomBytes(8).toString("hex")}`,
 );
 const nginxBinary = join(runtimeRoot, "sbin", "nginx");
 const installMarkerPath = join(runtimeRoot, ".install-complete");
+
+// 正常测试退出时清理本进程唯一运行时；SIGKILL 等异常退出留下的目录不
+// 会被后续进程复用，也不会阻断后续构建。
+process.once("exit", () => {
+  try {
+    rmSync(runtimeRoot, { recursive: true, force: true });
+  } catch (error) {
+    process.stderr.write(
+      `failed to remove pinned nginx runtime ${runtimeRoot}: ${String(error)}\n`,
+    );
+    // 保留已有失败状态；原本成功的运行不能掩盖临时目录清理失败。
+    if (!process.exitCode) process.exitCode = 1;
+  }
+});
 
 const sha256 = (value: Uint8Array): string =>
   createHash("sha256").update(value).digest("hex");
@@ -107,25 +125,41 @@ const execCapture = (
   });
 
 /**
- * 解析 nginx -V 输出，验证版本、关键 configure 参数与编译期 prefix。
- * 伪二进制（如“exit 0”脚本）无法产出带版本前缀的输出，直接判为不匹配；
- * prefix 不匹配（如从 staging 复制来的产物，其编译期 temp/log 路径指向
- * 已删除目录）同样拒绝。
+ * 构建与复用共用同一验证：命令必须成功，版本行和 configure 参数必须
+ * 精确匹配。输出检查只能验证运行契约；源码来源由下载 SHA-256 约束。
  */
 const verifyNginxVersionOutput = (
-  versionOutput: string,
+  captured: Awaited<ReturnType<typeof execCapture>>,
 ): { ok: boolean; detail: string } => {
-  if (!versionOutput.includes(`nginx version: nginx/${NGINX_VERSION}`)) {
+  if (captured.code !== 0) {
+    return { ok: false, detail: `nginx -V exited with ${String(captured.code)}` };
+  }
+  const versionOutput = `${captured.stdout}\n${captured.stderr}`;
+  const lines = versionOutput.split("\n").map((line) => line.trim());
+  const versionLines = lines.filter((line) => line.startsWith("nginx version:"));
+  if (
+    versionLines.length !== 1 ||
+    versionLines[0] !== `nginx version: nginx/${NGINX_VERSION}`
+  ) {
     return {
       ok: false,
       detail: `unexpected version output: ${JSON.stringify(versionOutput.trim().slice(0, 80))}`,
     };
   }
-  if (!versionOutput.includes(`--prefix=${runtimeRoot}`)) {
+  const configureLines = lines.filter((line) => line.startsWith("configure arguments:"));
+  if (configureLines.length !== 1) {
+    return { ok: false, detail: "missing or ambiguous configure arguments" };
+  }
+  const args = configureLines[0]!
+    .slice("configure arguments:".length)
+    .trim()
+    .split(/\s+/);
+  const prefixes = args.filter((arg) => arg.startsWith("--prefix="));
+  if (prefixes.length !== 1 || prefixes[0] !== `--prefix=${runtimeRoot}`) {
     return { ok: false, detail: `compiled prefix does not match ${runtimeRoot}` };
   }
   for (const arg of NGINX_CONFIGURE_ARGS) {
-    if (!versionOutput.includes(arg)) {
+    if (!args.includes(arg)) {
       return { ok: false, detail: `configure argument missing from binary: ${arg}` };
     }
   }
@@ -182,206 +216,18 @@ const verifyCachedRuntime = async (): Promise<boolean> => {
     return false;
   }
   if (binarySha !== marker.binarySha256) return false;
-  // 解析 nginx -V：伪二进制无法伪造版本行与 configure 参数。
+  // 同时检查退出码与精确版本/configure 参数。
   try {
     const captured = await execCapture(nginxBinary, ["-V"]);
-    const combined = `${captured.stdout}\n${captured.stderr}`;
-    return verifyNginxVersionOutput(combined).ok;
+    return verifyNginxVersionOutput(captured).ok;
   } catch {
     return false;
   }
 };
 
-/** 简单锁文件互斥：内容为持锁 PID；持锁进程不存在时视为陈旧可抢占。 */
-interface RuntimeLock {
-  readonly path: string;
-  readonly token: string;
-}
-
-/**
- * 进程启动身份：PID + 该进程的启动时间（etime/lstart 派生的稳定值）。
- * PID 复用会产生同 PID 的不同进程，但启动时间不同——以此区分“锁的
- * 原持有进程”与“碰巧复用同号 PID 的无关进程”。这是判定陈旧锁的
- * 唯一依据；不使用“到时间就抢”的年龄阈值（合法慢构建可能超过任何
- * 期限，破坏活跃锁违反互斥契约）。
- */
-const processStartIdentity = async (pid: number): Promise<string | undefined> => {
-  try {
-    const { stdout } = await execCapture("ps", ["-p", String(pid), "-o", "lstart="]);
-    const trimmed = stdout.trim();
-    return trimmed.length > 0 ? trimmed : undefined;
-  } catch {
-    return undefined;
-  }
-};
-
-/**
- * 跨进程互斥锁：以 O_EXCL（"wx"）原子创建锁文件，同一时刻只有一个
- * 获取者成功。锁内容为 JSON（token + pid + startIdentity）：
- * - 释放只删除 token 完全匹配的自有锁；
- * - 陈旧判定 = 锁记录的持有进程不存在，或存在但启动身份与锁记录不符
- *   （说明原持有者已死、当前同号 PID 是复用后的无关进程）；
- * - 抢占走“先原子换名（带走旧锁内容）、再检查换名结果中的 token 是否
- *   就是此前读取的同一 token”的 CAS 协议：读取与换名之间锁若被释放
- *   并被新持有者重建，换名会失败或换到的不是同一 token——两种情况都
- *   放弃并让调用方重试，绝不移动他人的新锁；
- * - 活跃持有者（进程存活且启动身份匹配）永不因年龄被抢占；调用方
- *   只能等待或最终报告锁超时。
- */
-export const acquireLock = async (lockPath: string): Promise<RuntimeLock | undefined> => {
-  await mkdir(dirname(lockPath), { recursive: true });
-  const { open } = await import("node:fs/promises");
-  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  try {
-    // 原子创建：EEXIST 即他人持有。
-    const handle = await open(lockPath, "wx");
-    try {
-      const start = await processStartIdentity(process.pid);
-      await handle.writeFile(
-        `${JSON.stringify({ token, pid: process.pid, startIdentity: start ?? null })}\n`,
-        "utf8",
-      );
-    } finally {
-      await handle.close();
-    }
-    return { path: lockPath, token };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-  }
-
-  // 锁已存在：仅当“持有进程已死（含 PID 复用）”时才允许回收。
-  let record: { token: string; pid: number; startIdentity: string | null } | undefined;
-  try {
-    const content = (await readFile(lockPath, "utf8")).trim();
-    record = JSON.parse(content) as {
-      token: string;
-      pid: number;
-      startIdentity: string | null;
-    };
-    if (
-      typeof record?.token !== "string" ||
-      !Number.isInteger(record?.pid) ||
-      (record?.startIdentity !== null && typeof record?.startIdentity !== "string")
-    ) {
-      record = undefined; // 锁内容损坏：按陈旧处理（可回收）。
-    }
-  } catch {
-    return undefined; // 读取失败/恰好被释放：让调用方重试。
-  }
-  if (record === undefined) {
-    // 损坏锁回收：CAS——换名成功且内容仍是损坏的同一份才继续。
-    // （换名后再读回校验；损坏内容没有 token 可比对，故以“换名成功
-    // 且文件内容与读取时一致”为准。）
-    return reclaimByRename(lockPath, undefined);
-  }
-  const holderAlive = await isHolderAlive(record);
-  if (holderAlive) return undefined; // 活跃持有者：等待，绝不抢占。
-  return reclaimByRename(lockPath, record.token);
-};
-
-/** 持有者是否仍存活：进程存在且启动身份与锁记录一致（防 PID 复用）。 */
-const isHolderAlive = async (record: {
-  pid: number;
-  startIdentity: string | null;
-}): Promise<boolean> => {
-  const currentStart = await processStartIdentity(record.pid);
-  if (currentStart === undefined) return false; // 进程不存在。
-  if (record.startIdentity === null) return true; // 锁未记录身份：仅按进程存在判定。
-  return currentStart === record.startIdentity;
-};
-
-/**
- * 陈旧锁回收（独立原子协议）：先把锁 rename 到私有路径（原子带走），
- * 再读回并确认 token 与此前读取的同一 token——只有一致才视为回收
- * 成功；不一致（读取与换名之间已被新持有者替换）或 rename 失败都
- * 放弃，把私有路径残件清理后让调用方重试。
- */
-const reclaimByRename = async (
-  lockPath: string,
-  expectedToken: string | undefined,
-): Promise<RuntimeLock | undefined> => {
-  const takeoverPath = `${lockPath}.stale-${process.pid}-${Date.now()}-${Math.random()
-    .toString(36)
-    .slice(2, 6)}`;
-  const { rename } = await import("node:fs/promises");
-  try {
-    await rename(lockPath, takeoverPath);
-  } catch {
-    return undefined; // 并发变化：让调用方重试。
-  }
-  // 换名成功后校验：换到的必须仍是此前读取的那份锁。
-  let movedContent = "";
-  try {
-    movedContent = (await readFile(takeoverPath, "utf8")).trim();
-  } catch {
-    // 无法读回：按无法确认处理，不回收。
-    await rm(takeoverPath, { force: true }).catch(() => {});
-    return undefined;
-  }
-  if (expectedToken !== undefined) {
-    let movedToken: unknown;
-    try {
-      movedToken = (JSON.parse(movedContent) as { token?: unknown }).token;
-    } catch {
-      movedToken = undefined;
-    }
-    if (movedToken !== expectedToken) {
-      // 读取与换名之间锁已被替换：这是他人的新锁，必须放回原位。
-      try {
-        await rename(takeoverPath, lockPath);
-      } catch {
-        // 放回失败（原位已被新锁占用）：把私有残件留在 stale 路径供诊断，
-        // 不删除他人锁。
-      }
-      return undefined;
-    }
-  }
-  await rm(takeoverPath, { force: true }).catch(() => {});
-  // 回收成功：重新以 O_EXCL 创建自有锁（递归一次，不无限循环）。
-  const { open } = await import("node:fs/promises");
-  const token = `${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-  try {
-    const handle = await open(lockPath, "wx");
-    try {
-      const start = await processStartIdentity(process.pid);
-      await handle.writeFile(
-        `${JSON.stringify({ token, pid: process.pid, startIdentity: start ?? null })}\n`,
-        "utf8",
-      );
-    } finally {
-      await handle.close();
-    }
-    return { path: lockPath, token };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-    return undefined; // 并发者先创建了：让调用方重试。
-  }
-};
-
-/** 释放锁：token 完全匹配才删除（不会误删他人的新锁）。 */
-const releaseLock = async (lock: RuntimeLock): Promise<void> => {
-  try {
-    const content = (await readFile(lock.path, "utf8")).trim();
-    let currentToken: unknown;
-    try {
-      currentToken = (JSON.parse(content) as { token?: unknown }).token;
-    } catch {
-      currentToken = undefined;
-    }
-    if (currentToken === lock.token) {
-      await rm(lock.path, { force: true });
-    }
-  } catch {
-    // 锁已不存在。
-  }
-};
-
-// 安装固定运行时：每次调用都先验证当前缓存内容；未命中时进行准备，
-// 期间并发的调用合并到同一次 in-flight 准备（settled 后引用清空）。
+// 安装固定运行时：每次调用都先验证当前进程拥有的运行时内容；未命中
+// 时进行准备，进程内并发调用合并到同一次 in-flight 构建。
 export const ensureNginxRuntime = async (): Promise<string> => {
-  if (await verifyCachedRuntime()) {
-    return nginxBinary;
-  }
   if (runtimePrepareInFlight !== undefined) {
     return runtimePrepareInFlight;
   }
@@ -397,27 +243,9 @@ const prepareNginxRuntime = async (): Promise<string> => {
   if (await verifyCachedRuntime()) {
     return nginxBinary;
   }
-  const lockPath = `${runtimeRoot}.lock`;
-  let lock: RuntimeLock | undefined;
-  // 有界抢锁循环：他人持锁时等待其完成；锁释放/陈旧后重试原子获取。
-  for (let attempt = 0; attempt < 600 && lock === undefined; attempt += 1) {
-    lock = await acquireLock(lockPath);
-    if (lock !== undefined) break;
-    // 等待期间持续复查：前一个构建者可能已完成（此时直接复用缓存）。
-    if (await verifyCachedRuntime()) return nginxBinary;
-    await new Promise((resolvePromise) => setTimeout(resolvePromise, 500));
-  }
-  if (lock === undefined) {
-    throw new Error("pinned nginx runtime cache is locked by another process");
-  }
-  // 获得锁后再次验证：前一个构建者可能在等待期间完成，避免重复重建。
-  if (await verifyCachedRuntime()) {
-    await releaseLock(lock);
-    return nginxBinary;
-  }
   try {
-    // 当前缓存目录与配方不符（可能为伪内容、半安装或旧配方）：只处理
-    // 这一精确目标，不删除其他 devhot-nginx-* 目录。
+    // 当前目录只属于本进程；内容不完整或被篡改时可安全重建这一精确
+    // 目标，不会触碰其他测试进程或历史运行时目录。
     await rm(runtimeRoot, { recursive: true, force: true });
     await mkdir(join(runtimeRoot, "src"), { recursive: true });
 
@@ -467,7 +295,7 @@ const prepareNginxRuntime = async (): Promise<string> => {
     const binarySha = sha256(await readFile(nginxBinary));
     // 内容验证：版本输出与 configure 参数（同时捕获 stdout 与 stderr）。
     const captured = await execCapture(nginxBinary, ["-V"]);
-    const verdict = verifyNginxVersionOutput(`${captured.stdout}\n${captured.stderr}`);
+    const verdict = verifyNginxVersionOutput(captured);
     if (!verdict.ok) {
       throw new Error(`built nginx binary failed verification: ${verdict.detail}`);
     }
@@ -484,8 +312,17 @@ const prepareNginxRuntime = async (): Promise<string> => {
     const { rename } = await import("node:fs/promises");
     await rename(markerTemp, installMarkerPath);
     return nginxBinary;
-  } finally {
-    await releaseLock(lock);
+  } catch (error) {
+    // 失败构建不留下半安装目录；后续调用可在同一进程内重新尝试。
+    try {
+      await rm(runtimeRoot, { recursive: true, force: true });
+    } catch (cleanupError) {
+      throw new AggregateError(
+        [error, cleanupError],
+        `nginx build failed and cleanup failed: ${runtimeRoot}`,
+      );
+    }
+    throw error;
   }
 };
 
@@ -720,7 +557,6 @@ export const serveWithNginx = async (
     );
 
   /**
-  /**
    * 按命令分别定义"成功 / 目标不存在 / 观测失败"语义，并验证输出本身：
    * "命令成功"（退出码 0）不等于"观测有效"——输出必须满足该命令的
    * 语法与完整性契约，否则一律 UNKNOWN：
@@ -770,11 +606,6 @@ export const serveWithNginx = async (
     command: "ps -p stat" | "ps -p command" | "ps -p pgid" | "ps -eo" | "lsof",
     result: Awaited<ReturnType<typeof runObserver>>,
   ): ObserverOutcome => {
-    if (process.env.DBG_OBSERVER === "1") {
-      process.stderr.write(
-        `DBG_CLASSIFY ${command} kind=${result.kind} code=${result.kind === "failed" ? String(result.code) : "0"} stdoutLen=${result.stdout.length} stdoutHead=${JSON.stringify(result.stdout.slice(0, 30))}\n`,
-      );
-    }
     const { code, stdout, stderr } =
       result.kind === "ok"
         ? { code: 0 as const, stdout: result.stdout, stderr: result.stderr }
