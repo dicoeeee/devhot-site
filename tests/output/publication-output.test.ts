@@ -322,6 +322,49 @@ describe("publication output", () => {
     );
   });
 
+  it.each([
+    String.raw`body { background-image: url("\68ttps://example.invalid/probe.png"); }`,
+    String.raw`body { background-image: url('\000068ttps://example.invalid/probe.png'); }`,
+    String.raw`body { background-image: url(\68 ttps://example.invalid/probe.png); }`,
+    String.raw`body { background-image: url("\2f\2f example.invalid/probe.png"); }`,
+    String.raw`body { background-image: u\72l("\68ttps://example.invalid/probe.png"); }`,
+    String.raw`@import "\68ttps://example.invalid/import.css";`,
+    String.raw`@import url("\68ttps://example.invalid/import.css");`,
+    String.raw`@\69mport "\68ttps://example.invalid/import.css";`,
+    String.raw`@import "\00002f\00002f example.invalid/import.css";`,
+    String.raw`:root { --image: url("\68ttps://example.invalid/probe.png"); } body { background: var(--image); }`,
+    String.raw`body { background-image: image-set("\68ttps://example.invalid/probe.png" 1x); }`,
+    String.raw`@font-face { font-family: probe; src: url("\68ttps://example.invalid/probe.woff2"); }`,
+    'body { background-image: url("ht\\\ntps://example.invalid/probe.png"); }',
+  ])("rejects CSS-escaped third-party dependencies: %s", async (payload) => {
+    const tamperedDist = await newTamperedDist();
+    await cp(distRoot, tamperedDist, { recursive: true });
+    await writeFile(join(tamperedDist, "probe.css"), payload);
+    await expect(
+      verifyDistribution({ distRoot: tamperedDist, requireSevenPageRelease: true }),
+    ).rejects.toThrow("external runtime dependency found in probe.css");
+  });
+
+  it.each([
+    String.raw`body { background-image: url("\2f media/local.png"); }`,
+    String.raw`body { background-image: u\72l(\2f media/local.png); }`,
+    String.raw`@import "\2f styles/local.css";`,
+    String.raw`@\69mport url("\2f styles/local.css");`,
+    String.raw`body { background-image: url("\2e\2f media/local.png"); }`,
+    String.raw`body { background-image: url("data:image/png;base64,AAAA"); }`,
+    String.raw`/* url("\68ttps://example.invalid/not-a-request") */ body::after { content: "https://example.invalid/text"; }`,
+  ])("accepts same-origin escaped CSS and non-loading text: %s", async (payload) => {
+    const tamperedDist = await newTamperedDist();
+    await cp(distRoot, tamperedDist, { recursive: true });
+    const stylesheet = join(tamperedDist, "probe.css");
+    await writeFile(stylesheet, payload);
+    await expect(
+      verifyDistribution({ distRoot: tamperedDist, requireSevenPageRelease: true }),
+    ).resolves.toMatchObject({ publicationId: expectedPublicationId });
+    // 分析阶段不得改写浏览器最终读取的 CSS。
+    expect(await readFile(stylesheet, "utf8")).toBe(payload);
+  });
+
   it("rejects a distributed script that registers a service worker", async () => {
     const tamperedDist = await newTamperedDist();
     await cp(distRoot, tamperedDist, { recursive: true });

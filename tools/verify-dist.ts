@@ -4,6 +4,7 @@ import { join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { parse as parseScript, type Node as AcornNode } from "acorn";
+import { transform as parseStylesheet } from "lightningcss";
 import { parse, type DefaultTreeAdapterMap } from "parse5";
 
 import { listSafeFiles } from "../src/infrastructure/list-safe-files";
@@ -391,22 +392,21 @@ const scanScriptSecurity = (source: string, path: string): void => {
 };
 
 const scanStyleSecurity = (source: string, path: string): void => {
-  // CSS 中的 URL 与 @import 同样按解析结果判断外部性（与 JS/HTML 一致）：
-  // 提取 url(...) 与 @import "..." 的候选值后走 isExternalScriptUrl。
-  const normalizedSource = normalizeUrlValue(source).replace(/[\t\n\r]/g, "");
-  const candidates: string[] = [];
-  for (const match of normalizedSource.matchAll(
-    /url\s*\(\s*(?:"([^"]*)"|'([^']*)'|([^)]*))\s*\)/gi,
-  )) {
-    candidates.push(match[1] ?? match[2] ?? match[3] ?? "");
-  }
-  for (const match of normalizedSource.matchAll(
-    /@import\s+(?:url\s*\(\s*)?["']([^"']+)["']/gi,
-  )) {
-    candidates.push(match[1] ?? "");
-  }
-  for (const candidate of candidates) {
-    if (isExternalScriptUrl(candidate)) {
+  // 先按 CSS 词法解析，再对解码后的 URL 判断外部性。不能预先删除换行
+  // 或直接匹配原文，否则十六进制转义、续行及转义函数名会与浏览器语义
+  // 不同。依赖分析同时涵盖 url()、@import、image-set 与自定义属性。
+  // 仅使用分析结果，不把转换后的 CSS 写回产物，也不下载任何依赖。
+  const { dependencies } = parseStylesheet({
+    filename: path,
+    code: Buffer.from(source),
+    analyzeDependencies: true,
+    errorRecovery: false,
+  });
+  for (const dependency of dependencies ?? []) {
+    if (
+      (dependency.type === "url" || dependency.type === "import") &&
+      isExternalScriptUrl(dependency.url)
+    ) {
       throw new Error(`external runtime dependency found in ${path}`);
     }
   }

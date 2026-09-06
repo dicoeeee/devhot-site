@@ -583,6 +583,91 @@ describe("pinned nginx runtime process lifecycle", () => {
   // =========================================================================
 
   it(
+    "isolates two same-millisecond startups and stops each instance independently",
+    { timeout: 300_000 },
+    async () => {
+      const binary = await ensureNginxRuntime();
+      const firstPort = await findFreePort();
+      let secondPort = await findFreePort();
+      for (let attempt = 0; secondPort === firstPort && attempt < 10; attempt += 1) {
+        secondPort = await findFreePort();
+      }
+      expect(secondPort).not.toBe(firstPort);
+
+      // 只固定两个调用入口的同一毫秒，随后立即还原真实时钟。旧实现的
+      // PID + Date.now 会产生同一路径；新实现必须由 OS 原子分配唯一目录。
+      const realNow = Date.now;
+      const instant = realNow();
+      let starting: Promise<NginxServer>[] = [];
+      try {
+        Date.now = () => instant;
+        starting = [firstPort, secondPort].map((port) =>
+          serveWithNginx(
+            binary,
+            build.distRoot,
+            projectConf.servingConfigPath,
+            projectConf.securityHeadersPath,
+            port,
+          ),
+        );
+      } finally {
+        Date.now = realNow;
+      }
+
+      // 两个启动均结束后再检视结果，失败路径也保留各自的清理责任。
+      const outcomes = await Promise.allSettled(starting);
+      const instances = outcomes.flatMap((outcome) =>
+        outcome.status === "fulfilled" ? [outcome.value] : [],
+      );
+      const failures: unknown[] = [];
+      try {
+        expect(instances).toHaveLength(2);
+        const [first, second] = instances as [NginxServer, NginxServer];
+        expect(first.configDir).not.toBe(second.configDir);
+        expect(first.instancePgid).not.toBe(second.instancePgid);
+        for (const instance of instances) {
+          expect((await stat(instance.configDir)).mode & 0o777).toBe(0o755);
+          const response = await probe(`${instance.origin}/software-engineering/`);
+          expect(response.status).toBe(200);
+          expectSecurityHeaders(response);
+        }
+
+        await first.stop();
+        await assertIndependentlyGone(first);
+        await assertIndependentlyAlive(second);
+        expect((await probe(`${second.origin}/software-engineering/`)).status).toBe(200);
+        await second.stop();
+        await assertIndependentlyGone(second);
+      } catch (error) {
+        failures.push(error);
+      } finally {
+        const cleanups = await Promise.allSettled(
+          outcomes.map(async (outcome) => {
+            if (outcome.status === "fulfilled") {
+              await outcome.value.stop();
+              await assertIndependentlyGone(outcome.value);
+            } else {
+              failures.push(outcome.reason);
+              if (outcome.reason instanceof NginxSetupError) {
+                await outcome.reason.resource.recover();
+              }
+            }
+          }),
+        );
+        for (const cleanup of cleanups) {
+          if (cleanup.status === "rejected") failures.push(cleanup.reason);
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(
+            failures,
+            "concurrent nginx instance isolation failed",
+          );
+        }
+      }
+    },
+  );
+
+  it(
     "verifies spawn pid, pid file, and listener identity match, then stops cleanly",
     { timeout: 30_000 },
     async () => {

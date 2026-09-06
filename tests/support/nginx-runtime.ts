@@ -2,7 +2,16 @@ import { execFile, spawn, type ChildProcess } from "node:child_process";
 import { promisify } from "node:util";
 import { createHash, randomBytes } from "node:crypto";
 import { rmSync } from "node:fs";
-import { chmod, cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -496,7 +505,8 @@ export const serveWithNginx = async (
   listenPort: number,
   options: ServeWithNginxOptions = {},
 ): Promise<NginxServer> => {
-  const configDir = join(tmpdir(), `devhot-nginx-conf-${process.pid}-${Date.now()}`);
+  // mkdir 的原子唯一性保证同进程、同毫秒的并发调用也不会共享实例目录。
+  const configDir = await mkdtemp(join(tmpdir(), `devhot-nginx-conf-${process.pid}-`));
 
   const realRemove = async (path: string): Promise<void> => rm(path, { recursive: true });
   let removeConfigDir: (path: string) => Promise<void> =
@@ -1016,7 +1026,8 @@ export const serveWithNginx = async (
   };
 
   try {
-    await mkdir(configDir, { recursive: true, mode: 0o755 });
+    // mkdtemp 默认为 0700，显式允许 worker 遍历本实例的服务目录。
+    await chmod(configDir, 0o755);
     // mkdtemp 建立的 fixture 目录是 0700；nginx worker（nobody）无法遍历会产生 403。
     // 把 dist 复制到 0755 的服务目录，供 worker 读取。
     const serveRoot = join(configDir, "dist");
