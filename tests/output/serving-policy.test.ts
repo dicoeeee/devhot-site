@@ -142,6 +142,14 @@ describe("serving security and cache policy", () => {
       "listens on privileged port 80 inside the container",
       (config: string) => config.replace("listen 8080;", "listen 80;"),
     ],
+    [
+      "exposes private state instead of the public deployment projection",
+      (config: string) =>
+        config.replace(
+          "alias /usr/share/nginx/maintenance/deployment.json;",
+          "alias /state/state.json;",
+        ),
+    ],
   ])(
     "rejects a serving config that %s",
     async (

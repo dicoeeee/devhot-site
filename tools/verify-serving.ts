@@ -20,6 +20,7 @@ const revalidatePaths: readonly string[] = [
   "location = /release.json {",
   "location = /_publication.json {",
   "location /maintenance/ {",
+  "location = /maintenance/deployment.json {",
   "location /timeline/fragments/ {",
 ];
 
@@ -45,6 +46,13 @@ export const verifyServing = async ({
 }: VerifyServingOptions): Promise<void> => {
   const configPath = resolve(servingConfigPath);
   const config = await readFile(configPath, "utf8");
+  const deploymentStatus = extractBlock(
+    config,
+    "location = /maintenance/deployment.json {",
+  );
+  if (!deploymentStatus.includes("alias /usr/share/nginx/maintenance/deployment.json;")) {
+    throw new Error("deployment status must use the governed public projection path");
+  }
   const headersPath = join(dirname(configPath), "security-headers.conf");
   const headersConfig = await readFile(headersPath, "utf8");
 

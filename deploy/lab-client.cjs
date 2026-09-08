@@ -55,6 +55,59 @@ const externalBlocked = () =>
     for await (const line of readline.createInterface({ input: process.stdin })) {
       const command = JSON.parse(line);
       if (command.action === "close") break;
+      if (command.action === "health") {
+        const observations = [];
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const response = await get("/release.json");
+          const home = await get("/software-engineering/");
+          const sha = response.status() === 200 ? (await response.json()).buildSha : null;
+          observations.push({
+            sha,
+            release_status: response.status(),
+            home_status: home.status(),
+            marker_found: (await home.text()).includes(command.marker),
+          });
+        }
+        console.log(
+          JSON.stringify({
+            status: "passed",
+            sha: command.sha,
+            healthy: observations.every(
+              (item) =>
+                item.sha === command.sha &&
+                item.release_status === 200 &&
+                item.home_status === 200 &&
+                item.marker_found,
+            ),
+            observations,
+          }),
+        );
+        continue;
+      }
+      if (command.action === "maintenance") {
+        const response = await get("/maintenance/deployment.json");
+        assert.equal(response.status(), 200);
+        assert.match(response.headers()["cache-control"], /no-cache, must-revalidate/);
+        assert.match(response.headers()["content-type"], /application\/json/);
+        assert.match(response.headers()["content-security-policy"], /connect-src 'self'/);
+        assert.equal(response.headers()["x-content-type-options"], "nosniff");
+        assert.equal(response.headers()["referrer-policy"], "no-referrer");
+        assert.equal(response.headers()["x-frame-options"], "DENY");
+        assert.match(response.headers()["permissions-policy"], /camera=\(\)/);
+        assert.equal(response.headers()["strict-transport-security"], undefined);
+        const value = await response.json();
+        assert.deepEqual(value, command.expected);
+        for (const path of [
+          "/state.json",
+          "/maintenance/state.json",
+          "/maintenance/deployment.json/extra",
+        ]) {
+          assert.equal((await get(path)).status(), 404);
+        }
+        console.log(JSON.stringify({ status: "passed", value, headers_verified: true }));
+        continue;
+      }
+      assert.equal(command.action, "verify");
       const release = await get(
         "/release.json",
         previousEtag ? { "If-None-Match": previousEtag } : {},

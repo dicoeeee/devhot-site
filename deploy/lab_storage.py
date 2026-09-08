@@ -3,13 +3,21 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 from lab_docker import Docker
-from release_store import DeploymentError, checked_sha, validate_artifact
+from release_store import DeploymentError, checked_sha, discard_candidate, validate_artifact
 
 
 class DockerStore:
+    @classmethod
+    def attach(cls, docker: Docker, candidates: Path, container: str):
+        """Attach to an experiment-owned controller; do not acquire ownership for cleanup."""
+        store = cls.__new__(cls)
+        store.docker, store.candidates, store.container = docker, candidates, container
+        return store
+
     def __init__(self, docker: Docker, work: Path, module: Path, image: str, network: str):
         self.docker = docker
         self.candidates = work / "exported-candidates"
@@ -69,8 +77,57 @@ class DockerStore:
             + ",volume-subpath=releases,readonly,volume-nocopy",
         ]
 
+    def has_candidate(self, sha: str) -> bool:
+        checked_sha(sha)
+        return os.path.lexists(self.candidates / sha) or json.loads(
+            self.execute("print(json.dumps(store.has_candidate(sys.argv[1])))", sha)
+        )
+
+    def discard_candidate(self, sha: str) -> None:
+        checked_sha(sha)
+        # The durable controller intent owns both transfer locations. Clear the
+        # native copy first; failure leaves the local copy and intent retryable.
+        self.execute("store.discard_candidate(sys.argv[1])", sha)
+        discard_candidate(self.candidates / sha)
+
     def current_sha(self) -> str | None:
         return json.loads(self.execute("print(json.dumps(store.current_sha()))"))
+
+    def current_target_sha(self) -> str | None:
+        return json.loads(self.execute("print(json.dumps(store.current_target_sha()))"))
+
+    @property
+    def state_exclusions(self) -> tuple[Path, ...]:
+        return (self.candidates,)
+
+    def check_layout(self) -> None:
+        self.execute("store.check_layout()")
+
+    def restore(self, sha: str | None) -> dict:
+        if sha is not None:
+            checked_sha(sha)
+        return json.loads(
+            self.execute(
+                "print(json.dumps(store.restore(json.loads(sys.argv[1]))))", json.dumps(sha)
+            )
+        )
+
+    def has_version(self, sha: str) -> bool:
+        checked_sha(sha)
+        return json.loads(self.execute("print(json.dumps(store.has_version(sys.argv[1])))", sha))
+
+    def discard_version(self, sha: str) -> None:
+        checked_sha(sha)
+        self.execute("store.discard_version(sys.argv[1])", sha)
+
+    def version_fingerprints(self, sha: str) -> dict:
+        checked_sha(sha)
+        return json.loads(
+            self.execute("print(json.dumps(store.version_fingerprints(sys.argv[1])))", sha)
+        )
+
+    def write_public_status(self, projection: dict) -> None:
+        self.execute("store.write_public_status(json.loads(sys.argv[1]))", json.dumps(projection))
 
     def activate(self, candidate: Path, sha: str) -> dict:
         checked_sha(sha)

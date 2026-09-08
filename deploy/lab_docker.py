@@ -221,13 +221,16 @@ class BrowserClient:
             raise DeploymentError("deployment_browser_failed") from None
 
     def verify(self, sha: str, marker: str) -> dict:
+        return self.command({"action": "verify", "sha": sha, "marker": marker})
+
+    def command(self, command: dict) -> dict:
         assert self.process.stdin
-        self.process.stdin.write(
-            json.dumps({"action": "verify", "sha": sha, "marker": marker}) + "\n"
-        )
+        self.process.stdin.write(json.dumps(command) + "\n")
         self.process.stdin.flush()
         result = self.receive(180)
-        if result.get("status") != "passed" or result.get("sha") != sha:
+        if result.get("status") != "passed" or (
+            "sha" in command and result.get("sha") != command["sha"]
+        ):
             raise DeploymentError("deployment_browser_failed")
         return result
 

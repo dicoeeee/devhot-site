@@ -172,6 +172,8 @@ class Lab:
         version: str,
         node_image: str,
         network: str,
+        *,
+        command: str = BUILD_COMMAND,
     ) -> str:
         self.phase = "build_" + version
         source = self.work / ("source-" + version)
@@ -214,9 +216,7 @@ class Lab:
                 "--env",
                 "NO_PROXY=localhost,127.0.0.1,::1",
             ]
-        name = self.docker.create(
-            "builder-" + version, options, node_image, ["sh", "-ec", BUILD_COMMAND]
-        )
+        name = self.docker.create("builder-" + version, options, node_image, ["sh", "-ec", command])
         inspected = self.docker.inspect(name)
         if (
             inspected["HostConfig"]["Privileged"]
@@ -352,6 +352,122 @@ class Lab:
         )
         return name
 
+    def start_client(self, client_image, service_network, source, server) -> None:
+        options = [
+            "--interactive",
+            "--network",
+            service_network,
+            "--user",
+            "1000:1000",
+            "--read-only",
+            "--cap-drop",
+            "ALL",
+            "--security-opt",
+            "no-new-privileges=true",
+            "--tmpfs",
+            "/tmp:rw,nosuid,size=512m,mode=1777",
+            "--shm-size",
+            "256m",
+            "--env",
+            "HOME=/tmp",
+            "--env",
+            "NODE_OPTIONS=",
+            "--env",
+            "HTTP_PROXY=",
+            "--env",
+            "HTTPS_PROXY=",
+            "--env",
+            "ALL_PROXY=",
+            "--env",
+            "http_proxy=",
+            "--env",
+            "https_proxy=",
+            "--env",
+            "all_proxy=",
+            *bind(source / "deploy/lab-client.cjs", "/probe.cjs"),
+            "--entrypoint",
+            "node",
+        ]
+        self.phase = "client_start"
+        client = self.docker.create("client", options, client_image, ["/probe.cjs", server])
+        self.client = BrowserClient(self.docker, client)
+
+    def verify_isolation(self, server, before, service_network, build_network, node_image) -> None:
+        self.phase = "isolation"
+        after = self.docker.inspect(server)
+        if (
+            before["Id"] != after["Id"]
+            or before["State"]["StartedAt"] != after["State"]["StartedAt"]
+        ):
+            raise DeploymentError("deployment_nginx_restarted")
+        address = after["NetworkSettings"]["Networks"][service_network]["IPAddress"]
+        outsider = self.docker.create(
+            "outsider",
+            ["--network", build_network, "--entrypoint", "node"],
+            node_image,
+            [
+                "-e",
+                "const net=require('node:net');"
+                "const s=net.connect({host:process.argv[1],port:8080});"
+                "s.on('connect',()=>process.exit(1));"
+                "s.on('error',()=>process.exit(0));"
+                "s.setTimeout(2000,()=>process.exit(0));",
+                address,
+            ],
+        )
+        self.docker.call("start", "--attach", outsider)
+        if self.docker.inspect(outsider)["State"]["ExitCode"] != 0:
+            raise DeploymentError("deployment_network_isolation_failed")
+        self.record(
+            "isolation",
+            nginx_container_id=after["Id"],
+            nginx_started_at=after["State"]["StartedAt"],
+            nginx_not_restarted=True,
+            unapproved_client="blocked",
+            host_ports="none",
+        )
+
+    def exercise(self, fixture, store, node_image, build_network, service_network) -> None:
+        marker1, marker2 = "LAB-V1-" + self.run_id, "LAB-V2-" + self.run_id
+        self.phase = "source_v1"
+        first = fixture.version(marker1)
+        builder1 = self.builder(fixture, store, first, "v1", node_image, build_network)
+        self.phase = "client_image"
+        client_image = self.docker.commit_client(builder1)
+        self.phase = "activate_v1"
+        store.activate(store.candidates / first, first)
+        self.record("activate_v1", sha=first, current_sha=store.current_sha())
+        server = self.nginx(store, service_network, fixture.root)
+        before = self.docker.inspect(server)
+        self.start_client(client_image, service_network, fixture.root, server)
+        self.phase = "http_v1"
+        self.record(
+            "http_v1",
+            **{
+                key: value
+                for key, value in self.client.verify(first, marker1).items()
+                if key != "status"
+            },
+        )
+        self.phase = "source_v2"
+        second = fixture.version(marker2)
+        self.builder(fixture, store, second, "v2", node_image, build_network)
+        self.phase = "activate_v2"
+        if store.current_sha() != first or not self.docker.inspect(server)["State"]["Running"]:
+            raise DeploymentError("deployment_prepare_changed_current")
+        store.activate(store.candidates / second, second)
+        self.record("activate_v2", sha=second, previous_sha=first, current_sha=store.current_sha())
+        self.phase = "http_v2"
+        self.record(
+            "http_v2",
+            **{
+                key: value
+                for key, value in self.client.verify(second, marker2).items()
+                if key != "status"
+            },
+        )
+        self.verify_isolation(server, before, service_network, build_network, node_image)
+
     def run(self) -> None:
         status, code = "failed", "deployment_lab_failed"
         try:
@@ -391,116 +507,7 @@ class Lab:
                 service_network,
             )
             self.volume_preflight(store, node_image, service_network)
-            marker1, marker2 = "LAB-V1-" + self.run_id, "LAB-V2-" + self.run_id
-            self.phase = "source_v1"
-            first = fixture.version(marker1)
-            builder1 = self.builder(fixture, store, first, "v1", node_image, build_network)
-            self.phase = "client_image"
-            client_image = self.docker.commit_client(builder1)
-            self.phase = "activate_v1"
-            store.activate(store.candidates / first, first)
-            self.record("activate_v1", sha=first, current_sha=store.current_sha())
-            server = self.nginx(store, service_network, fixture.root)
-            before = self.docker.inspect(server)
-            options = [
-                "--interactive",
-                "--network",
-                service_network,
-                "--user",
-                "1000:1000",
-                "--read-only",
-                "--cap-drop",
-                "ALL",
-                "--security-opt",
-                "no-new-privileges=true",
-                "--tmpfs",
-                "/tmp:rw,nosuid,size=512m,mode=1777",
-                "--shm-size",
-                "256m",
-                "--env",
-                "HOME=/tmp",
-                "--env",
-                "NODE_OPTIONS=",
-                "--env",
-                "HTTP_PROXY=",
-                "--env",
-                "HTTPS_PROXY=",
-                "--env",
-                "ALL_PROXY=",
-                "--env",
-                "http_proxy=",
-                "--env",
-                "https_proxy=",
-                "--env",
-                "all_proxy=",
-                *bind(fixture.root / "deploy/lab-client.cjs", "/probe.cjs"),
-                "--entrypoint",
-                "node",
-            ]
-            self.phase = "client_start"
-            client = self.docker.create("client", options, client_image, ["/probe.cjs", server])
-            self.client = BrowserClient(self.docker, client)
-            self.phase = "http_v1"
-            self.record(
-                "http_v1",
-                **{
-                    key: value
-                    for key, value in self.client.verify(first, marker1).items()
-                    if key != "status"
-                },
-            )
-            self.phase = "source_v2"
-            second = fixture.version(marker2)
-            self.builder(fixture, store, second, "v2", node_image, build_network)
-            self.phase = "activate_v2"
-            if store.current_sha() != first or not self.docker.inspect(server)["State"]["Running"]:
-                raise DeploymentError("deployment_prepare_changed_current")
-            store.activate(store.candidates / second, second)
-            self.record(
-                "activate_v2", sha=second, previous_sha=first, current_sha=store.current_sha()
-            )
-            self.phase = "http_v2"
-            self.record(
-                "http_v2",
-                **{
-                    key: value
-                    for key, value in self.client.verify(second, marker2).items()
-                    if key != "status"
-                },
-            )
-            self.phase = "isolation"
-            after = self.docker.inspect(server)
-            if (
-                before["Id"] != after["Id"]
-                or before["State"]["StartedAt"] != after["State"]["StartedAt"]
-            ):
-                raise DeploymentError("deployment_nginx_restarted")
-            address = after["NetworkSettings"]["Networks"][service_network]["IPAddress"]
-            outsider = self.docker.create(
-                "outsider",
-                ["--network", build_network, "--entrypoint", "node"],
-                node_image,
-                [
-                    "-e",
-                    "const net=require('node:net');"
-                    "const s=net.connect({host:process.argv[1],port:8080});"
-                    "s.on('connect',()=>process.exit(1));"
-                    "s.on('error',()=>process.exit(0));"
-                    "s.setTimeout(2000,()=>process.exit(0));",
-                    address,
-                ],
-            )
-            self.docker.call("start", "--attach", outsider)
-            if self.docker.inspect(outsider)["State"]["ExitCode"] != 0:
-                raise DeploymentError("deployment_network_isolation_failed")
-            self.record(
-                "isolation",
-                nginx_container_id=after["Id"],
-                nginx_started_at=after["State"]["StartedAt"],
-                nginx_not_restarted=True,
-                unapproved_client="blocked",
-                host_ports="none",
-            )
+            self.exercise(fixture, store, node_image, build_network, service_network)
             self.phase = "client_cleanup"
             self.client.close()
             self.client = None
@@ -540,6 +547,7 @@ class Lab:
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--preflight", action="store_true")
+    parser.add_argument("--recovery", action="store_true")
     parser.add_argument("--context")
     parser.add_argument("--output", type=Path)
     arguments = parser.parse_args()
@@ -549,7 +557,12 @@ def main() -> int:
         else:
             project = Path(__file__).resolve().parent.parent
             output = arguments.output or project / ".cache/deployment-lab" / uuid.uuid4().hex
-            lab = Lab(project, output.absolute(), arguments.context)
+            if arguments.recovery:
+                from lab_recovery import RecoveryLab
+
+                lab = RecoveryLab(project, output.absolute(), arguments.context)
+            else:
+                lab = Lab(project, output.absolute(), arguments.context)
             lab.run()
             print(json.dumps({"status": "passed", "run_id": lab.run_id}))
         return 0

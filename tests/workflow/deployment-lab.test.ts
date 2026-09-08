@@ -10,6 +10,7 @@ it("runs the real lab outside the socket-free Node gate container on PR and main
   expect(lab).not.toContain("container:");
   expect(lab).toContain("run: npm ci");
   expect(lab).toContain("npm run deployment:lab");
+  expect(lab).toContain("--recovery --output");
   expect(lab).toContain("ref: ${{ github.event.pull_request.head.sha || github.sha }}");
   expect(lab).not.toContain("continue-on-error");
   expect(lab).not.toContain("secrets.");
