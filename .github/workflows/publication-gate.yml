@@ -137,7 +137,7 @@ jobs:
       - name: Install Nginx build toolchain
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends make gcc libc6-dev libssl-dev tar ca-certificates
+          sudo apt-get install -y --no-install-recommends python3 make gcc libc6-dev libssl-dev tar ca-certificates
 
       - name: Run the single repository gate
         shell: bash

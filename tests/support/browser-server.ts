@@ -105,7 +105,12 @@ export const serveDistribution = async (distRoot: string): Promise<StaticServer>
   return {
     origin: `http://127.0.0.1:${address.port}`,
     close: () =>
-      new Promise<void>((resolvePromise) => server.close(() => resolvePromise())),
+      new Promise<void>((resolvePromise, rejectPromise) => {
+        server.close((error) => (error ? rejectPromise(error) : resolvePromise()));
+        // Test teardown owns this server's connections, including browser
+        // preconnects and incomplete requests that server.close waits for.
+        server.closeAllConnections();
+      }),
   };
 };
 

@@ -20,7 +20,7 @@ root，生成按领域切换的编辑型首页、当前洞察详情与独立来�
 
 ## 唯一门禁
 
-需要 Node.js `24.19.0`：
+需要 Node.js `24.19.0`、Python 3.9+（部署文件系统测试使用标准库）：
 
 ```sh
 npm ci
@@ -39,6 +39,36 @@ bundle。真实 Chrome、Edge 与 Safari 的人工验收清单见
 `docs/manual-browser-acceptance.md`；未执行的真实浏览器证据不冒充已通过。
 
 `npm run build` 复用同一输入与输出验证链，但不替代完整门禁。
+
+## 本地多容器升级实验室
+
+在已有的本地 Docker 兼容运行时中执行：
+
+```sh
+npm ci
+npm run deployment:lab
+```
+
+命令要求本地 Unix Docker endpoint、Git、Node `24.19.0` 和 Python 3.9+；可用
+`-- --context <本地context>`
+显式选择现有运行时。缺失或远端 endpoint 都会非零退出，不会自动安装、启动或重建运行时，也不会 skip。实验室只创建本次带唯一身份的容器和网络，结束时清理它们，保留
+`.cache/deployment-lab/` 下的阶段报告与构建日志。
+
+实验从公开工作树生成临时 Git v1/v2。每个版本在固定 Node 容器内独立执行
+`npm ci`、锁定浏览器准备与完整
+`npm run gate`；构建容器只挂载只读源码，产物由控制器复制、验证后再提升。固定非特权 Nginx 只读挂载发布父目录，`current`
+原子切换不重启 Nginx。批准客户端在同一真实 Chromium 会话验证七类页面、缓存、新内容及断网阅读；另一隔离网络中的客户端不得访问服务。实验不发布主机端口、不写真实 GitHub
+main，也不安装真实 Linux 服务或启用 timer。
+
+默认从 Docker Hub 取得已锁定的 Node digest。若该网络不可用， `DEVHOT_LAB_NODE_IMAGE`
+只允许改为同一 digest 的 Docker Official Images
+ECR 分发地址；不会接受其他版本或任意镜像。仅构建容器可通过 `DEVHOT_LAB_BUILD_PROXY`
+使用无凭据的 HTTP(S) 构建代理，运行时客户端会清空这些变量并只加入 internal 网络。完整验收映射及与真实 Rootless/LAN 验收的区别见
+[实验室说明](docs/deployment-lab.md)。
+
+若默认 Debian 下载路径不可用，可显式设置
+`DEVHOT_LAB_DEBIAN_MIRROR=ustc`。该选项仅在临时构建容器中将 Debian 主仓库和安全更新仓库切至 Debian 官方镜像列表中的 USTC
+HTTPS 入口；保留发行版、组件、签名密钥和 APT 完整性校验，不改变宿主软件源。未设置时继续使用镜像默认源，其他值明确失败。
 
 ## 候选发布门禁
 
