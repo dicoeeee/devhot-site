@@ -29,7 +29,6 @@ def git(root: Path, *args: str) -> str:
             *args,
         ],
         capture_output=True,
-        text=True,
         check=True,
         timeout=60,
         env={
@@ -38,7 +37,9 @@ def git(root: Path, *args: str) -> str:
             "GIT_CONFIG_NOSYSTEM": "1",
         },
     )
-    return result.stdout.strip()
+    # NUL-delimited Git paths must retain whitespace and literal CR bytes.
+    # Decode as filesystem names without universal-newline conversion.
+    return os.fsdecode(result.stdout)
 
 
 class SourceFixture:
@@ -70,7 +71,7 @@ class SourceFixture:
         self.home = json.loads((root / "site-input/data/home.json").read_text())
 
     def version(self, marker: str) -> str:
-        baseline = checked_sha(git(self.root, "rev-parse", "HEAD"))
+        baseline = checked_sha(git(self.root, "rev-parse", "HEAD").strip())
         home = json.loads(json.dumps(self.home))
         if home.get("schemaVersion") != 2:
             raise DeploymentError("deployment_lab_requires_current_input")
@@ -102,7 +103,7 @@ class SourceFixture:
         self.format_json(manifest_path)
         git(self.root, "add", "site-input")
         git(self.root, "commit", "--quiet", "-m", "isolated lab version " + marker)
-        return checked_sha(git(self.root, "rev-parse", "HEAD"))
+        return checked_sha(git(self.root, "rev-parse", "HEAD").strip())
 
     def format_json(self, path: Path) -> None:
         subprocess.run(

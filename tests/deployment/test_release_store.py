@@ -240,6 +240,51 @@ class ReleaseStoreTests(unittest.TestCase):
             SourceFixture(project, self.root / "unsafe-snapshot")
         self.assertFalse((self.root / "unsafe-snapshot/site-input/data/home.json").exists())
 
+    def test_source_snapshot_preserves_indexed_names_without_copying_untracked_collisions(self):
+        sys.path.insert(0, str(PROJECT / "deploy"))
+        from lab_source import SourceFixture, git
+
+        for index, name in enumerate(
+            (" public.txt", "\tpublic.txt", "\rpublic.txt", "line\rname.txt")
+        ):
+            with self.subTest(name=name):
+                project = self.root / f"public-project-{index}"
+                (project / "site-input/data").mkdir(parents=True)
+                (project / "site-input/data/home.json").write_text(
+                    '{"schemaVersion":2,"domains":[]}'
+                )
+                (project / name).write_text("INDEXED PUBLIC CONTENT")
+                git(project, "init", "--quiet", "-b", "main")
+                git(project, "add", ".")
+                shadow = "line\nname.txt" if name == "line\rname.txt" else "public.txt"
+                (project / shadow).write_text("UNTRACKED PRIVATE SENTINEL")
+                fixture = SourceFixture(project, self.root / f"snapshot-{index}")
+                self.assertFalse((fixture.root / shadow).exists())
+                self.assertEqual((fixture.root / name).read_text(), "INDEXED PUBLIC CONTENT")
+
+    def test_source_export_preserves_indexed_names_without_copying_untracked_collisions(self):
+        sys.path.insert(0, str(PROJECT / "deploy"))
+        from lab_source import SourceFixture, git
+
+        project = self.root / "public-project"
+        (project / "site-input/data").mkdir(parents=True)
+        (project / "site-input/data/home.json").write_text('{"schemaVersion":2,"domains":[]}')
+        git(project, "init", "--quiet", "-b", "main")
+        git(project, "add", ".")
+        fixture = SourceFixture(project, self.root / "snapshot")
+        for name in (" public.txt", "line\rname.txt"):
+            (fixture.root / name).write_text("INDEXED PUBLIC CONTENT")
+            git(fixture.root, "add", "--", name)
+        for name in ("public.txt", "line\nname.txt"):
+            (fixture.root / name).write_text("UNTRACKED PRIVATE SENTINEL")
+        exported = self.root / "exported"
+        fixture.export(exported)
+        for name in ("public.txt", "line\nname.txt"):
+            self.assertFalse((exported / name).exists())
+        for name in (" public.txt", "line\rname.txt"):
+            self.assertEqual((exported / name).read_text(), "INDEXED PUBLIC CONTENT")
+        self.assertFalse((exported / ".git").exists())
+
     def test_timed_out_docker_process_has_a_distinct_diagnostic(self):
         sys.path.insert(0, str(PROJECT / "deploy"))
         from lab_docker import Docker
