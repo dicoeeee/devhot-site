@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import stat
 import uuid
 from pathlib import Path, PurePosixPath
@@ -89,6 +90,28 @@ def validate_artifact(root: Path, sha: str) -> dict[str, str]:
         raise DeploymentError("deployment_artifact_unreadable") from None
 
 
+def artifact_fingerprints(root: Path, sha: str) -> dict[str, str]:
+    hashes = validate_artifact(root, sha)
+    exact = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+    release = read_json(root / "release.json")
+    # A full rebuild has a new build timestamp. All other public bytes and
+    # release metadata must agree before reusing an immutable successful tree.
+    release.pop("generatedAt", None)
+    hashes["release.json"] = hashlib.sha256(
+        json.dumps(release, sort_keys=True).encode()
+    ).hexdigest()
+    semantic = hashlib.sha256(json.dumps(hashes, sort_keys=True).encode()).hexdigest()
+    return {"exact": exact, "semantic": semantic}
+
+
+def discard_candidate(path: Path) -> None:
+    if os.path.lexists(path):
+        if path.is_symlink() or not path.is_dir():
+            path.unlink()
+        else:
+            shutil.rmtree(path)
+
+
 class ReleaseStore:
     def __init__(self, root: Path):
         if root.is_symlink():
@@ -97,6 +120,21 @@ class ReleaseStore:
         self.candidates = self.root / "candidates"
         self.releases = self.root / "releases"
         self.versions = self.releases / "versions"
+
+    @property
+    def state_exclusions(self) -> tuple[Path, ...]:
+        return (self.root,)
+
+    def check_layout(self) -> None:
+        for path in (self.root, self.candidates, self.releases, self.versions):
+            if path.is_symlink() or (path.exists() and not path.is_dir()):
+                raise DeploymentError("deployment_invalid_storage")
+        html = self.releases / "html"
+        if os.path.lexists(html):
+            if not html.is_symlink() or os.readlink(html) != "current":
+                raise DeploymentError("deployment_invalid_storage")
+        elif os.path.lexists(self.releases / "current"):
+            raise DeploymentError("deployment_invalid_storage")
 
     def initialize(self) -> None:
         for path in (self.root, self.candidates, self.releases, self.versions):
@@ -114,7 +152,27 @@ class ReleaseStore:
         if not html.is_symlink() or os.readlink(html) != "current":
             raise DeploymentError("deployment_invalid_storage")
 
+    def has_candidate(self, sha: str) -> bool:
+        checked_sha(sha)
+        self.check_layout()
+        return os.path.lexists(self.candidates / sha)
+
+    def discard_candidate(self, sha: str) -> None:
+        checked_sha(sha)
+        self.check_layout()
+        discard_candidate(self.candidates / sha)
+
     def current_sha(self) -> str | None:
+        sha = self.current_target_sha()
+        if (
+            sha is not None
+            and read_json(self.versions / sha / "release.json").get("buildSha") != sha
+        ):
+            raise DeploymentError("deployment_invalid_current")
+        return sha
+
+    def current_target_sha(self) -> str | None:
+        """Read the confined pointer without trusting a failed release's metadata."""
         pointer = self.releases / "current"
         if not os.path.lexists(pointer):
             return None
@@ -125,7 +183,7 @@ class ReleaseStore:
             raise DeploymentError("deployment_invalid_current")
         sha = checked_sha(target.removeprefix("versions/"))
         version = self.versions / sha
-        if version.is_symlink() or read_json(version / "release.json").get("buildSha") != sha:
+        if version.is_symlink() or not version.is_dir():
             raise DeploymentError("deployment_invalid_current")
         return sha
 
@@ -148,6 +206,58 @@ class ReleaseStore:
             for name in files:
                 (Path(directory) / name).chmod(0o644)
         os.rename(candidate, destination)
+        self._switch_current(sha)
+        return {"sha": sha, "previous_sha": previous, "files": hashes}
+
+    def restore(self, sha: str | None) -> dict:
+        previous = self.current_target_sha()
+        if sha is not None:
+            checked_sha(sha)
+            validate_artifact(self.versions / sha, sha)
+        self._switch_current(sha)
+        return {"sha": sha, "previous_sha": previous}
+
+    def discard_version(self, sha: str) -> None:
+        checked_sha(sha)
+        if self.current_sha() == sha:
+            raise DeploymentError("deployment_current_version_protected")
+        path = self.versions / sha
+        if path.is_symlink() or (path.exists() and not path.is_dir()):
+            raise DeploymentError("deployment_invalid_version")
+        if path.exists():
+            shutil.rmtree(path)
+
+    def has_version(self, sha: str) -> bool:
+        return os.path.lexists(self.versions / checked_sha(sha))
+
+    def version_fingerprints(self, sha: str) -> dict[str, str]:
+        return artifact_fingerprints(self.versions / checked_sha(sha), sha)
+
+    def write_public_status(self, projection: dict) -> None:
+        self.check_layout()
+        directory = self.releases / "maintenance"
+        if directory.is_symlink() or (directory.exists() and not directory.is_dir()):
+            raise DeploymentError("deployment_invalid_storage")
+        directory.mkdir(mode=0o755, exist_ok=True)
+        temporary = directory / (".deployment-" + uuid.uuid4().hex)
+        try:
+            descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
+            with os.fdopen(descriptor, "w") as stream:
+                os.fchmod(stream.fileno(), 0o644)
+                json.dump(projection, stream, allow_nan=False)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, directory / "deployment.json")
+        except OSError:
+            raise DeploymentError("deployment_public_status_write_failed") from None
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    def _switch_current(self, sha: str | None) -> None:
+        if sha is None:
+            (self.releases / "current").unlink(missing_ok=True)
+            return
         temporary = self.releases / (".current-" + uuid.uuid4().hex)
         try:
             temporary.symlink_to("versions/" + sha)
@@ -155,4 +265,3 @@ class ReleaseStore:
         finally:
             if os.path.lexists(temporary):
                 temporary.unlink()
-        return {"sha": sha, "previous_sha": previous, "files": hashes}

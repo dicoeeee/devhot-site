@@ -1,6 +1,6 @@
 """Actual filesystem observations at the deployment command boundary."""
 
-import importlib.util
+import importlib
 import json
 import os
 import pathlib
@@ -11,11 +11,8 @@ import unittest
 from unittest.mock import patch
 
 PROJECT = pathlib.Path(__file__).resolve().parents[2]
-MODULE = PROJECT / "deploy" / "release_store.py"
-spec = importlib.util.spec_from_file_location("release_store", MODULE)
-store_module = importlib.util.module_from_spec(spec)
-sys.modules["release_store"] = store_module
-spec.loader.exec_module(store_module)
+sys.path.insert(0, str(PROJECT / "deploy"))
+store_module = importlib.import_module("release_store")
 ReleaseStore = store_module.ReleaseStore
 DeploymentError = store_module.DeploymentError
 

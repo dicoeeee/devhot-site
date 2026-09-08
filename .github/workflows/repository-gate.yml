@@ -100,8 +100,10 @@ jobs:
           PR_IS_DRAFT: ${{ github.event.pull_request.draft }}
         run: npx tsx tools/validate-pull-request.ts
 
-      - name: Run the real multi-container upgrade lab
-        run: npm run deployment:lab -- --output "$RUNNER_TEMP/devhot-deployment-lab"
+      - name: Run the real multi-container upgrade and failure recovery lab
+        run:
+          npm run deployment:lab -- --recovery --output
+          "$RUNNER_TEMP/devhot-deployment-lab"
 
       - name: Record deployment lab evidence
         if: always()
