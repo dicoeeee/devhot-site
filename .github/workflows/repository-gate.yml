@@ -39,7 +39,7 @@ jobs:
       - name: Install Git and build toolchain for repository fixtures
         run: |
           apt-get update
-          apt-get install -y --no-install-recommends git make gcc libc6-dev libssl-dev tar ca-certificates
+          apt-get install -y --no-install-recommends git make gcc libc6-dev libssl-dev tar ca-certificates python3
 
       - name: Install locked dependencies
         run: npm ci
@@ -57,4 +57,77 @@ jobs:
         run: npx tsx tools/validate-pull-request.ts
 
       - name: Run the single repository gate
+        id: gate-result
         run: npm run gate
+
+      - name: Record gate event evidence
+        if: always()
+        run: |
+          {
+            echo "Event: ${{ github.event_name }}/${{ github.event.action || 'none' }}"
+            echo "Tested SHA: ${{ github.event.pull_request.head.sha || github.sha }}"
+            echo "npm run gate: ${{ steps.gate-result.outcome }}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  deployment-lab:
+    name: deployment-lab
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    env:
+      ASTRO_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Check out the exact candidate for the isolated lab
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Set up the fixed Node runtime
+        uses: actions/setup-node@2028fbc5c25fe9cf00d9f06a71cc4710d4507903
+        with:
+          node-version: "24.19.0"
+
+      - name: Install locked lab command dependencies
+        run: npm ci
+
+      - name: Validate lab pull request metadata
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BASE_REF: ${{ github.base_ref }}
+          PR_HEAD_REF: ${{ github.head_ref }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_IS_DRAFT: ${{ github.event.pull_request.draft }}
+        run: npx tsx tools/validate-pull-request.ts
+
+      - name: Run the real multi-container upgrade lab
+        run: npm run deployment:lab -- --output "$RUNNER_TEMP/devhot-deployment-lab"
+
+      - name: Record deployment lab evidence
+        if: always()
+        env:
+          LAB_REPORT: ${{ runner.temp }}/devhot-deployment-lab/report.json
+        run: |
+          python3 - <<'PY'
+          import json, os, pathlib
+          report = json.loads(pathlib.Path(os.environ["LAB_REPORT"]).read_text())
+          print(json.dumps(report, ensure_ascii=False, indent=2))
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
+              stream.write("## Real deployment lab\n\n")
+              stream.write("Event: ${{ github.event_name }}/${{ github.event.action || 'none' }}\n\n")
+              stream.write("Tested SHA: ${{ github.event.pull_request.head.sha || github.sha }}\n\n")
+              stream.write("```json\n" + json.dumps(report, ensure_ascii=False, indent=2) + "\n```\n")
+          if report["status"] != "passed":
+              raise SystemExit(1)
+          PY
+
+      - name: Show failed lab build diagnostics
+        if: failure()
+        run: |
+          for log in "$RUNNER_TEMP"/devhot-deployment-lab/logs/*.log; do
+            if test -f "$log"; then
+              echo "::group::$(basename "$log")"
+              tail -n 100 "$log"
+              echo "::endgroup::"
+            fi
+          done
