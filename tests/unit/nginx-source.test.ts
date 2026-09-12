@@ -1,3 +1,4 @@
+import { deepStrictEqual } from "node:assert";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -50,10 +51,10 @@ it("creates only a verified immutable input and never overwrites an existing des
     .mockImplementation(async () => new Response(new Uint8Array(valid)));
   try {
     await prepareNginxSource(output);
-    expect(await readFile(output)).toEqual(valid);
+    deepStrictEqual(await readFile(output), valid);
     expect((await stat(output)).mode & 0o777).toBe(0o444);
     await expect(prepareNginxSource(output)).rejects.toMatchObject({ code: "EEXIST" });
-    expect(await readFile(output)).toEqual(valid);
+    deepStrictEqual(await readFile(output), valid);
     fetcher.mockResolvedValue(new Response("corrupt"));
     const rejected = join(root, "rejected.tar.gz");
     await expect(prepareNginxSource(rejected)).rejects.toThrow("tarball sha256 mismatch");
