@@ -12,6 +12,9 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlparse
 
+from host_builder import BUILD_COMMAND as HOST_BUILD_COMMAND
+from host_builder import PREPARE_COMMAND as HOST_PREPARE_COMMAND
+from host_docker import BUILDER_SECURITY
 from lab_docker import (
     NGINX_DIGEST,
     NGINX_IMAGE,
@@ -21,11 +24,13 @@ from lab_docker import (
     BrowserClient,
     Docker,
 )
+from lab_host_network import verify_host_port
 from lab_source import SourceFixture
 from lab_storage import DockerStore
 from release_store import DeploymentError, validate_artifact
 
-BUILD_COMMAND = """set -eu
+BUILD_COMMAND = (
+    """set -eu
 mkdir -p /workspace
 cp -a /source/. /workspace/
 cd /workspace
@@ -49,14 +54,17 @@ Acquire::Retries "2";
 APT
   export APT_CONFIG=/tmp/devhot-lab-apt.conf
 fi
-apt-get update -o APT::Update::Error-Mode=any
-apt-get install -y --no-install-recommends \\
-  git python3 make gcc libc6-dev libssl-dev tar ca-certificates
-npm ci
-node node_modules/@playwright/test/cli.js install --with-deps chromium firefox webkit
-npm run gate
+"""
+    + HOST_PREPARE_COMMAND
+    + """
+apt-get install -y --no-install-recommends systemd
+DEVHOT_PACKAGE_LAB=1 python3 -B tests/deployment/verify_linux_package.py
+"""
+    + HOST_BUILD_COMMAND
+    + """
 chmod -R a+rX /ms-playwright
 """
+)
 
 
 def preflight(context: str | None = None) -> dict:
@@ -181,10 +189,7 @@ class Lab:
         options = [
             "--network",
             network,
-            "--shm-size",
-            "512m",
-            "--memory",
-            "3g",
+            *BUILDER_SECURITY,
             *bind(source, "/source"),
             "--env",
             "DEVHOT_SITE_BUILD_SHA=" + sha,
@@ -192,6 +197,8 @@ class Lab:
             "ASTRO_TELEMETRY_DISABLED=1",
             "--env",
             "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright",
+            "--env",
+            "DEVHOT_NGINX_SOURCE_TARBALL=/prepared/nginx-source.tar.gz",
         ]
         proxy = os.environ.get("DEVHOT_LAB_BUILD_PROXY")
         mirror = os.environ.get("DEVHOT_LAB_DEBIAN_MIRROR")
@@ -492,6 +499,8 @@ class Lab:
             if nginx["user"] not in ("101", "101:101"):
                 raise DeploymentError("deployment_image_identity_rejected")
             self.record("images", node=node, nginx=nginx)
+            self.phase = "host_published_port"
+            self.record("host_published_port", **verify_host_port(self.docker))
             self.phase = "networks"
             build_network = self.docker.network("build", False)
             service_network = self.docker.network("service", True)

@@ -293,6 +293,12 @@ class DeploymentState:
 
     @contextmanager
     def locked(self, *, write: bool):
+        # One host command can hold the lock across ref lookup and nested core
+        # operations. Only the same object/thread/process may reuse ownership.
+        if self.owner == (os.getpid(), threading.get_ident()):
+            self.require_lock(write=write)
+            yield
+            return
         self.private_directory(self.directory, create=write)
         self.private_directory(self.runtime, create=write)
         descriptor = os.open(

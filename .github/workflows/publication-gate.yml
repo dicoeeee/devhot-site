@@ -15,6 +15,7 @@ jobs:
     timeout-minutes: 30
     env:
       ASTRO_TELEMETRY_DISABLED: "1"
+      DEVHOT_NGINX_SOURCE_TARBALL: "/tmp/devhot-nginx-source.tar.gz"
     steps:
       - name: Check out the candidate without credentials
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -133,6 +134,9 @@ jobs:
 
       - name: Install pinned browser engines
         run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Prepare digest-verified Nginx source input
+        run: node tools/prepare-nginx-source.ts "$DEVHOT_NGINX_SOURCE_TARBALL"
 
       - name: Install Nginx build toolchain
         run: |

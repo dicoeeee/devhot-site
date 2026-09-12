@@ -1,0 +1,17 @@
+{
+  "schemaVersion": 1,
+  "account": "devhot-site",
+  "uid": "REPLACE_WITH_APPROVED_UID",
+  "gid": "REPLACE_WITH_APPROVED_GID",
+  "lan_ipv4": "REPLACE_WITH_APPROVED_LAN_IPV4",
+  "allowed_ipv4_cidrs": ["REPLACE_WITH_APPROVED_CLIENT_CIDR"],
+  "release_root": "/srv/devhot-site",
+  "state_root": "/var/lib/devhot-site",
+  "tool_root": "/opt/devhot-site",
+  "rootlesskit": {
+    "path": "/usr/bin/rootlesskit",
+    "sha256": "REPLACE_WITH_VERIFIED_SHA256",
+    "device": "REPLACE_WITH_VERIFIED_DEVICE",
+    "inode": "REPLACE_WITH_VERIFIED_INODE"
+  }
+}

@@ -140,6 +140,66 @@ class DeploymentControllerTests(unittest.TestCase):
         self.controller.store = self.store
         return native, transport
 
+    def test_outer_lock_survives_nested_command_exception_and_blocks_other_owners(self):
+        with self.controller.locked(create=True):
+            with self.assertRaisesRegex(RuntimeError, "inner"), self.controller.locked(create=True):
+                raise RuntimeError("inner")
+            self.controller.persistence.require_lock(write=True)
+            result = self.controller.deploy(self.first)
+            self.assertEqual(result["status"], "success")
+            competing = subprocess.run(
+                [sys.executable, "-c", "import fcntl,sys; f=open(sys.argv[1], 'r+'); "
+                 "fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)", str(self.controller.lock_file)],
+                capture_output=True,
+            )
+            self.assertNotEqual(competing.returncode, 0)
+            errors = []
+
+            def other_thread():
+                try:
+                    with self.controller.locked(create=True):
+                        errors.append("unexpected acquisition")
+                except DeploymentError as error:
+                    errors.append(str(error))
+
+            thread = threading.Thread(target=other_thread)
+            thread.start()
+            thread.join(5)
+            self.assertEqual(errors, ["deployment_busy"])
+            self.controller.persistence.require_lock(write=True)
+        with self.controller.locked(create=False):
+            with self.assertRaisesRegex(DeploymentError, "deployment_lock_required"):
+                self.controller.deploy(self.second)
+            self.controller.persistence.require_lock()
+            self.assertEqual(self.controller.status()["state"]["current_sha"], self.first)
+        self.assertEqual(self.controller.deploy(self.second)["status"], "success")
+        self.assertEqual(self.read_http("/"), "second public version")
+
+    def test_ref_preparation_failures_share_total_three_attempt_budget(self):
+        self.controller.deploy(self.first)
+        transient = importlib.import_module("deployment_controller").PreparationUnavailable
+        observations = self.root / "attempts"
+
+        def unavailable(sha):
+            with observations.open("a") as stream:
+                stream.write(sha + "\n")
+            raise transient()
+
+        self.controller.prepare = unavailable
+        result = self.controller.deploy(self.second, preparation_attempts_used=2)
+        self.assertEqual(result["status"], "failed")
+        self.assertEqual(result["phase"], "prepare")
+        self.assertEqual(result["prepare_attempts"], 3)
+        self.assertEqual(observations.read_text().splitlines(), [self.second])
+        state = self.controller.status()["state"]
+        self.assertIsNone(state["failed_sha"])
+        self.assertEqual(state["last_observed_sha"], self.second)
+        self.assertEqual(self.read_http("/"), "first public version")
+        self.assertFalse((self.store.candidates / self.second).exists())
+        self.controller.prepare = self.prepare
+        self.assertEqual(self.controller.deploy(self.second)["status"], "success")
+        self.assertEqual(self.read_http("/"), "second public version")
+
     def test_native_candidate_copy_failure_is_cleaned_and_explicit_retry_succeeds(self):
         native, transport = self.docker_store_with_real_transport()
         self.controller.deploy(self.first)
