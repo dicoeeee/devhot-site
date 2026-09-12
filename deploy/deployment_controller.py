@@ -32,12 +32,15 @@ class PreparationUnavailable(DeploymentError):
 
 
 class DeploymentController:
-    def __init__(self, store, state_dir: Path, runtime_dir: Path, *, prepare, build, health):
+    def __init__(
+        self, store, state_dir: Path, runtime_dir: Path, *, prepare, build, health, event=None
+    ):
         self.store = store
         self.persistence = DeploymentState(state_dir, runtime_dir, forbidden=store.state_exclusions)
         self.state_dir, self.runtime_dir = self.persistence.directory, self.persistence.runtime
         self.state_file, self.lock_file = self.persistence.file, self.persistence.lock_file
         self.prepare, self.build, self.health = prepare, build, health
+        self.event = event
 
     def locked(self, *, create: bool):
         return self.persistence.locked(write=create)
@@ -73,6 +76,8 @@ class DeploymentController:
 
     def save_state(self, state: dict) -> None:
         self.persistence.write(state)
+        if self.event is not None and state["pending"] is not None:
+            self.event(state["phase"], state["pending"]["sha"], "started")
 
     @staticmethod
     def require_idle(state: dict) -> None:
@@ -138,8 +143,12 @@ class DeploymentController:
         self.save_state(state)
         return result
 
-    def deploy(self, sha: str, *, retry: bool = False) -> dict:
+    def deploy(
+        self, sha: str, *, retry: bool = False, preparation_attempts_used: int = 0
+    ) -> dict:
         checked_sha(sha)
+        if type(preparation_attempts_used) is not int or not 0 <= preparation_attempts_used < 3:
+            raise DeploymentError("deployment_invalid_prepare_budget")
         with self.locked(create=True):
             state = self.read_state()
             self.require_idle(state)
@@ -181,7 +190,7 @@ class DeploymentController:
             phase = "prepare"
             reuse = False
             try:
-                for attempt in range(1, 4):
+                for attempt in range(preparation_attempts_used + 1, 4):
                     try:
                         phase = "prepare"
                         state.update(phase="preparing", prepare_attempts=attempt)
@@ -484,6 +493,8 @@ class DeploymentController:
         return result
 
     def check_health(self, sha: str) -> bool:
+        if self.event is not None:
+            self.event("health", sha, "started")
         try:
             return self.health(sha) is True
         except Exception:

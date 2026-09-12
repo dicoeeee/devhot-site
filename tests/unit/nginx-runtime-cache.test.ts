@@ -93,6 +93,8 @@ describe("pinned nginx runtime isolation and integrity", () => {
     // 已拒绝当前内容并进入重建；随后还原本测试快照，独立验证完整证据。
     // 自动重新编译恢复另由下方 reswap 黑盒反例覆盖。
     const expectRejected = async (mutate: () => Promise<void>): Promise<void> => {
+      const preparedSource = process.env.DEVHOT_NGINX_SOURCE_TARBALL;
+      delete process.env.DEVHOT_NGINX_SOURCE_TARBALL;
       const denied = new Error("controlled rebuild download failure");
       const download = vi.spyOn(globalThis, "fetch").mockRejectedValue(denied);
       try {
@@ -103,6 +105,8 @@ describe("pinned nginx runtime isolation and integrity", () => {
         await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
       } finally {
         download.mockRestore();
+        if (preparedSource !== undefined)
+          process.env.DEVHOT_NGINX_SOURCE_TARBALL = preparedSource;
         await rm(root, { recursive: true, force: true });
         await cp(join(snapshot, "runtime"), root, { recursive: true });
       }
@@ -217,6 +221,8 @@ describe("pinned nginx runtime isolation and integrity", () => {
     );
 
     it("removes the whole owned root when a downloaded tarball fails integrity", async () => {
+      const preparedSource = process.env.DEVHOT_NGINX_SOURCE_TARBALL;
+      delete process.env.DEVHOT_NGINX_SOURCE_TARBALL;
       const download = vi
         .spyOn(globalThis, "fetch")
         .mockResolvedValue(new Response("corrupt tarball"));
@@ -227,6 +233,8 @@ describe("pinned nginx runtime isolation and integrity", () => {
         await expect(stat(root)).rejects.toMatchObject({ code: "ENOENT" });
       } finally {
         download.mockRestore();
+        if (preparedSource !== undefined)
+          process.env.DEVHOT_NGINX_SOURCE_TARBALL = preparedSource;
         await rm(root, { recursive: true, force: true });
         await cp(join(snapshot, "runtime"), root, { recursive: true });
       }
@@ -458,6 +466,8 @@ const realRmSync = fs.rmSync;
 const buildError = new Error("controlled download failure");
 const cleanupError = new Error("controlled cleanup failure");
 let root;
+// This fault targets the download path, even when the parent prepared source.
+delete process.env.DEVHOT_NGINX_SOURCE_TARBALL;
 globalThis.fetch = async () => {
   const entries = (await fsp.readdir(isolated)).filter((name) => name.startsWith("devhot-nginx-"));
   if (entries.length !== 1) throw new Error("expected one process-owned root");

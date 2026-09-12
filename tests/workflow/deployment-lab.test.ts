@@ -1,3 +1,4 @@
+import { spawnSync } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { expect, it } from "vitest";
 
@@ -26,8 +27,19 @@ it("uses the single gate and existing immutable Node identity inside real builde
   expect(digest).toBeDefined();
   expect(images).toContain(digest);
   expect(pkg.scripts["deployment:lab"]).toBe("python3 deploy/lab.py");
-  expect(lab).toContain("npm ci\n");
-  expect(lab).toContain("npm run gate\n");
+  const assembled = spawnSync(
+    "python3",
+    [
+      "-B",
+      "-c",
+      "import sys;sys.path.insert(0,'deploy');from lab import BUILD_COMMAND;print(BUILD_COMMAND,end='')",
+    ],
+    { encoding: "utf8", timeout: 10_000 },
+  );
+  expect(assembled.error).toBeUndefined();
+  expect(assembled.status, assembled.stderr).toBe(0);
+  expect(assembled.stdout).toContain("npm ci\n");
+  expect(assembled.stdout).toContain("npm run gate\n");
   expect(lab).toContain("DEVHOT_SITE_BUILD_SHA");
   expect(lab).not.toContain("--privileged");
   expect(lab).not.toContain("/var/run/docker.sock:/");

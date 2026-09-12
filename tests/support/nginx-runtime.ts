@@ -20,10 +20,12 @@ import { dirname, join } from "node:path";
 // - 版本：nginx 1.30.4（官方稳定行）
 // - 完整性：下载源码的 tarball SHA-256 固定，安装后记录二进制指纹
 // - 构建：源码 ./configure + make，安装到本进程的唯一临时目录
-export const NGINX_VERSION = "1.30.4";
-export const NGINX_TARBALL_SHA256 =
-  "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b";
-const NGINX_URL = `https://nginx.org/download/nginx-${NGINX_VERSION}.tar.gz`;
+import {
+  NGINX_VERSION,
+  NGINX_TARBALL_SHA256,
+  readNginxSource,
+} from "../../tools/nginx-source.ts";
+export { NGINX_VERSION, NGINX_TARBALL_SHA256 } from "../../tools/nginx-source.ts";
 
 const execFileAsync = promisify(execFile) as (
   command: string,
@@ -260,9 +262,7 @@ const prepareNginxRuntime = async (): Promise<string> => {
 
     const sourceRoot = join(runtimeRoot, "src", `nginx-${NGINX_VERSION}`);
     try {
-      const tarball = Buffer.from(
-        await (await fetch(NGINX_URL, { redirect: "follow" })).arrayBuffer(),
-      );
+      const tarball = await readNginxSource();
       if (sha256(tarball) !== NGINX_TARBALL_SHA256) {
         throw new Error("pinned nginx tarball sha256 mismatch");
       }

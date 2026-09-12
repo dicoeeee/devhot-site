@@ -70,6 +70,11 @@ ECR 分发地址；不会接受其他版本或任意镜像。仅构建容器可�
 `DEVHOT_LAB_DEBIAN_MIRROR=ustc`。该选项仅在临时构建容器中将 Debian 主仓库和安全更新仓库切至 Debian 官方镜像列表中的 USTC
 HTTPS 入口；保留发行版、组件、签名密钥和 APT 完整性校验，不改变宿主软件源。未设置时继续使用镜像默认源，其他值明确失败。
 
+## Rootless 主机部署包
+
+专用非登录账号的前置检查、安装材料、默认禁用的用户级 timer，以及手动部署、状态、重试和回滚入口见
+[Rootless Linux 部署说明](docs/rootless-deployment.md)。这些材料复用实验室的状态机与构建命令；目标 VM 的权限、网络、重启和日程验收仍由 #85 完成。
+
 ## 候选发布门禁
 
 `.github/workflows/publication-gate.yml` 只响应 `publication/**` 候选分支，稳定检查名为
