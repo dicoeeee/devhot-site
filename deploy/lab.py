@@ -104,6 +104,15 @@ def preflight(context: str | None = None) -> dict:
             check=True,
         )
         info = json.loads(result.stdout)
+        if (
+            not isinstance(info, dict)
+            or info.get("ServerErrors")
+            or not all(
+                isinstance(info.get(field), str) and info[field].strip()
+                for field in ("OSType", "Architecture", "ServerVersion")
+            )
+        ):
+            raise DeploymentError("deployment_runtime_unavailable")
         if info.get("OSType") != "linux" or info.get("Architecture") not in (
             "aarch64",
             "arm64",
