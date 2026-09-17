@@ -167,6 +167,155 @@ class ReleaseStoreTests(unittest.TestCase):
         self.assertEqual(json.loads(result.stdout)["code"], "deployment_requires_local_unix_socket")
         self.assertNotIn("PRIVATE_MARKER", result.stdout + result.stderr)
 
+    def docker_info_command(self, directory, stdout, *, returncode=0, full=False):
+        tools = directory / "tools"
+        tools.mkdir(parents=True)
+        state = directory / "daemon-state"
+        state.write_text("existing resources unchanged")
+        observed = directory / "info-observed"
+        docker = tools / "docker"
+        docker.write_text(
+            f"#!{sys.executable}\n"
+            "import pathlib, sys\n"
+            "if sys.argv[1:] != ['info', '--format', '{{json .}}']:\n"
+            f"    pathlib.Path({str(state)!r}).write_text('unexpected daemon action')\n"
+            "    sys.exit(99)\n"
+            f"pathlib.Path({str(observed)!r}).write_text('info')\n"
+            f"sys.stdout.write({stdout!r})\n"
+            "sys.stderr.write('PRIVATE_DOCKER_MARKER unix:///private-daemon.sock')\n"
+            f"sys.exit({returncode})\n"
+        )
+        docker.chmod(0o755)
+        output = directory / "lab-result"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(PROJECT / "deploy/lab.py"),
+                *(["--output", str(output)] if full else ["--preflight"]),
+            ],
+            cwd=PROJECT,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            env={
+                "PATH": str(tools) + os.pathsep + "/usr/bin:/bin",
+                "DOCKER_HOST": "unix:///private-daemon.sock",
+            },
+        )
+        self.assertEqual(observed.read_text(), "info")
+        self.assertEqual(state.read_text(), "existing resources unchanged")
+        receipts = [json.loads(line) for line in result.stdout.splitlines()]
+        evidence = result.stdout + result.stderr
+        if full:
+            evidence += "".join(path.read_text() for path in output.rglob("*") if path.is_file())
+            report = json.loads((output / "report.json").read_text())
+            self.assertEqual(len(receipts), 2)
+            self.assertEqual(
+                receipts[0],
+                {
+                    "run_id": report["run_id"],
+                    "phase": "cleanup",
+                    "status": "passed",
+                    "owned_resources_removed": True,
+                },
+            )
+            self.assertEqual(receipts[-1], {"status": report["status"], "code": report["code"]})
+            self.assertEqual(report["status"], "failed")
+            self.assertEqual(report["failure_phase"], "preflight")
+            self.assertEqual(
+                [event["phase"] for event in report["events"]], ["preflight", "cleanup"]
+            )
+            self.assertFalse((output / "work").exists())
+        else:
+            self.assertEqual(len(receipts), 1)
+            self.assertFalse(output.exists())
+        self.assertNotIn("PRIVATE_DOCKER_MARKER", evidence)
+        self.assertNotIn("private-daemon.sock", evidence)
+        self.assertEqual(result.stderr, "")
+        return result
+
+    def test_docker_info_failures_are_unavailable_without_deployment_actions(self):
+        supported = {"OSType": "linux", "Architecture": "arm64", "ServerVersion": "28.0.4"}
+        responses = [
+            (json.dumps({**supported, "ServerErrors": ["PRIVATE_DOCKER_MARKER"]}), 0),
+            (json.dumps({"ServerErrors": ["PRIVATE_DOCKER_MARKER"], "OSType": ""}), 0),
+            ("", 0),
+            ("{PRIVATE_DOCKER_MARKER", 0),
+            ("{}", 0),
+            ("[]", 0),
+            ("null", 0),
+            ('"PRIVATE_DOCKER_MARKER"', 0),
+            ("42", 0),
+            ("false", 0),
+            (json.dumps(supported), 1),
+        ]
+        for field in supported:
+            responses.append(
+                (json.dumps({key: value for key, value in supported.items() if key != field}), 0)
+            )
+            for value in (None, "", " \t", 28):
+                responses.append((json.dumps({**supported, field: value}), 0))
+        for index, (stdout, returncode) in enumerate(responses):
+            # Exercise representative errors through the full deployment command
+            # as well; field variants share the same preflight failure boundary.
+            for full in (False, True) if index in (0, 3, 4, 10) else (False,):
+                with self.subTest(response=index, full=full):
+                    result = self.docker_info_command(
+                        self.root / f"response-{index}-{full}",
+                        stdout,
+                        returncode=returncode,
+                        full=full,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(
+                        json.loads(result.stdout.splitlines()[-1]),
+                        {"status": "failed", "code": "deployment_runtime_unavailable"},
+                    )
+
+    def test_complete_docker_info_distinguishes_supported_and_unsupported_platforms(self):
+        for architecture in ("aarch64", "arm64", "x86_64", "amd64"):
+            with self.subTest(architecture=architecture):
+                info = {
+                    "OSType": "linux",
+                    "Architecture": architecture,
+                    "ServerVersion": "28.0.4",
+                    "ServerErrors": [],
+                }
+                result = self.docker_info_command(self.root / architecture, json.dumps(info))
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(
+                    json.loads(result.stdout),
+                    {
+                        "status": "passed",
+                        "phase": "preflight",
+                        "os": "linux",
+                        "architecture": architecture,
+                        "server_version": "28.0.4",
+                    },
+                )
+        for os_type, architecture in (("windows", "amd64"), ("linux", "riscv64")):
+            for full in (False, True):
+                with self.subTest(os_type=os_type, architecture=architecture, full=full):
+                    result = self.docker_info_command(
+                        self.root / f"unsupported-{os_type}-{full}",
+                        json.dumps(
+                            {
+                                "OSType": os_type,
+                                "Architecture": architecture,
+                                "ServerVersion": "28.0.4",
+                            }
+                        ),
+                        full=full,
+                    )
+                    self.assertEqual(result.returncode, 1)
+                    self.assertEqual(
+                        json.loads(result.stdout.splitlines()[-1]),
+                        {
+                            "status": "failed",
+                            "code": "deployment_unsupported_platform",
+                        },
+                    )
+
     def test_full_command_never_cleans_up_a_rejected_remote_daemon(self):
         tools = self.root / "tools"
         tools.mkdir()
