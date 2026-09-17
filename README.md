@@ -162,3 +162,5 @@ SHA-256 固定，源码构建）启动完整产物并以真实 HTTP 请求验证
 
 CSP 中 `connect-src 'self'` 用于时间线的同源意图加载（ADR 0242）；与 ADR 0222 首版
 `connect-src 'none'` 的字面冲突由治理 Issue dicoeeee/devhot#98 跟踪修订。
+
+<!-- Issue81 permission-negative fixture; no functional change. -->
