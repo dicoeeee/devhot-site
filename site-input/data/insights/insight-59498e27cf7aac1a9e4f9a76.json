@@ -1,0 +1,55 @@
+{
+  "citations": [
+    {
+      "evidenceId": "evidence-1",
+      "quote": "Reliable agents use immutable inputs",
+      "sourceId": "source-59498e27cf7aac1a9e4f9a76"
+    }
+  ],
+  "contentDate": {
+    "basis": "published_at",
+    "value": "2026-08-11T08:00:00+00:00"
+  },
+  "domain": "software-engineering",
+  "domainImplications": "工程自动化需要可重放边界。",
+  "domains": [
+    "software-engineering"
+  ],
+  "id": "insight-59498e27cf7aac1a9e4f9a76",
+  "keyInterpretation": "关键变化是把输出绑定到可审计输入。",
+  "mechanism": {
+    "blocks": [
+      {
+        "evidenceRefs": [
+          {
+            "evidenceId": "evidence-1",
+            "quote": "Reliable agents use immutable inputs"
+          }
+        ],
+        "kind": "text",
+        "text": "先冻结输入，再执行显式校验。"
+      }
+    ],
+    "status": "present"
+  },
+  "officialUrl": "https://example.com/reliable-agent-1",
+  "relations": {
+    "deterministic": [],
+    "modelDerived": []
+  },
+  "schemaVersion": 2,
+  "sourceId": "source-59498e27cf7aac1a9e4f9a76",
+  "sourceUrl": "/sources/source-59498e27cf7aac1a9e4f9a76/",
+  "summary": "不可变输入让自动化结果可重放。",
+  "tags": [
+    {
+      "name": "software-engineering",
+      "type": "domain"
+    },
+    {
+      "name": "reliability",
+      "type": "problem"
+    }
+  ],
+  "title": "Reliable agent architecture 1"
+}

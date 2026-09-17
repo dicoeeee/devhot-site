@@ -1,0 +1,33 @@
+{
+  "archive": {
+    "archivedAt": "2026-08-12T01:01:00+00:00",
+    "completeness": "complete",
+    "contentSha256": "4b198be704eb6fa712b844e6c40dbe89e564644152cd9df3d4ee658d0bf3873c",
+    "status": "first_success_snapshot"
+  },
+  "content": [
+    {
+      "kind": "text",
+      "text": "Reliable agents use immutable inputs and explicit validation."
+    },
+    {
+      "alt": "Architecture 1",
+      "assetPath": "assets/sha256/73bc08f1a558271ed021a4f51fcc4a07d2850deea7cb592282ae0f9d5a110c89.png",
+      "kind": "image"
+    }
+  ],
+  "contentDate": {
+    "basis": "published_at",
+    "value": "2026-08-11T08:00:00+00:00"
+  },
+  "id": "source-59498e27cf7aac1a9e4f9a76",
+  "insightId": "insight-59498e27cf7aac1a9e4f9a76",
+  "insightUrl": "/insights/insight-59498e27cf7aac1a9e4f9a76/",
+  "officialUrl": "https://example.com/reliable-agent-1",
+  "schemaVersion": 2,
+  "source": {
+    "id": "fixture-source",
+    "name": "Fixture Source"
+  },
+  "title": "Reliable agent architecture 1"
+}

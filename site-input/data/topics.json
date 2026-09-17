@@ -1,1 +1,423 @@
-{"schemaVersion":2,"matchingRulesVersion":"same-type-or-cross-type-and-v1","tags":[{"type":"domain","name":"software-engineering","definition":"软件系统的设计、开发、测试、交付与维护。","aliases":["Software Engineering","software engineering"],"domains":["software-engineering"],"relatedTopicIds":[],"relatedInsightIds":["insight-7c3f9a41d2b8e60554af1c9e"]},{"type":"domain","name":"model-research","definition":"模型能力、训练、推理、评测及相关系统研究。","aliases":["Model Research","model research"],"domains":["model-research"],"relatedTopicIds":[],"relatedInsightIds":["insight-000000000000000000000002"]},{"type":"problem","name":"reliability","definition":"系统在预期条件下持续产生正确且可复核结果的能力。","aliases":["Reliability"],"domains":["software-engineering","model-research"],"relatedTopicIds":["reliable-agent-delivery"],"relatedInsightIds":["insight-7c3f9a41d2b8e60554af1c9e","insight-000000000000000000000002"]},{"type":"method","name":"evaluation","definition":"使用可复现任务、指标和样本测量模型或系统能力。","aliases":["Evaluation","Evals","evals"],"domains":["software-engineering","model-research"],"relatedTopicIds":["evaluation-boundaries"],"relatedInsightIds":["insight-000000000000000000000002"]},{"type":"method","name":"observability","definition":"利用遥测信号理解系统内部状态和行为的方法。","aliases":["telemetry","distributed tracing"],"domains":["software-engineering"],"relatedTopicIds":[],"relatedInsightIds":[]}],"topics":[{"id":"reliable-agent-delivery","version":3,"name":"可靠 Agent 交付","scope":"Agent 变更如何绑定冻结输入、独立验证与最终准入。","domains":["software-engineering","model-research"],"tagFilters":[{"tagType":"problem","anyOf":["reliability"]}],"currentMemberInsightIds":["insight-7c3f9a41d2b8e60554af1c9e","insight-000000000000000000000002"],"latestConfirmedJudgment":{"id":"topic-judgment-reliable-agent-delivery-1","sequence":1,"topicVersion":3,"matchingRulesVersion":"same-type-or-cross-type-and-v1","statement":"可靠 Agent 交付正在从生成能力转向可验证的变更闭环。","boundary":"证据来自具备独立检查和明确最终准入权的工程系统。","confirmedAt":"2026-08-18T09:30:00+08:00","evidence":{"articleCount":4,"sourceCount":2,"dateFrom":"2026-07-28","dateTo":"2026-08-12"}}},{"id":"evaluation-boundaries","version":1,"name":"评估边界","scope":"评估如何绑定可复核输入和明确适用范围。","domains":["model-research"],"tagFilters":[{"tagType":"method","anyOf":["evaluation"]}],"currentMemberInsightIds":["insight-000000000000000000000002"]}]}
+{
+  "matchingRulesVersion": "same-type-or-cross-type-and-v1",
+  "schemaVersion": 2,
+  "tags": [
+    {
+      "aliases": [
+        "Model Research",
+        "model research"
+      ],
+      "definition": "模型能力、训练、推理、评测及相关系统研究。",
+      "domains": [
+        "model-research"
+      ],
+      "name": "model-research",
+      "relatedInsightIds": [
+        "insight-44e68c98d99871735274ed68"
+      ],
+      "relatedTopicIds": [],
+      "type": "domain"
+    },
+    {
+      "aliases": [
+        "Software Engineering",
+        "software engineering"
+      ],
+      "definition": "软件系统的设计、开发、测试、交付与维护。",
+      "domains": [
+        "software-engineering"
+      ],
+      "name": "software-engineering",
+      "relatedInsightIds": [
+        "insight-59498e27cf7aac1a9e4f9a76"
+      ],
+      "relatedTopicIds": [],
+      "type": "domain"
+    },
+    {
+      "aliases": [
+        "software deployment"
+      ],
+      "definition": "把已验证变更交付到目标运行环境的生命周期阶段。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "deployment",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "lifecycle"
+    },
+    {
+      "aliases": [
+        "incident response",
+        "incident remediation",
+        "postmortem"
+      ],
+      "definition": "识别、缓解、恢复并复盘生产异常的生命周期阶段。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "incident-response",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "lifecycle"
+    },
+    {
+      "aliases": [
+        "Production",
+        "production-ready"
+      ],
+      "definition": "系统进入真实使用并承担持续运行责任的生命周期阶段。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "production",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "lifecycle"
+    },
+    {
+      "aliases": [
+        "software testing"
+      ],
+      "definition": "通过可重复检查发现缺陷并验证预期行为的生命周期阶段。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "testing",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "lifecycle"
+    },
+    {
+      "aliases": [
+        "agent memory",
+        "agentic memory"
+      ],
+      "definition": "Agent 保存、检索和治理跨步骤或跨任务信息的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "agent-memory",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "Agent Skills",
+        "agent skills"
+      ],
+      "definition": "把可复用任务说明、资源和工具边界封装为 Agent 能力的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "agent-skills",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "Code Execution",
+        "code execution"
+      ],
+      "definition": "在受控运行环境中执行代码并观察结果的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "code-execution",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "Code Review",
+        "code review"
+      ],
+      "definition": "在变更进入目标代码线前检查其正确性、风险和可维护性。",
+      "domains": [
+        "software-engineering"
+      ],
+      "name": "code-review",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "Evaluation",
+        "Evals",
+        "evals"
+      ],
+      "definition": "使用可复现任务、指标和样本测量模型或系统能力。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "evaluation",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "human in the loop",
+        "human review"
+      ],
+      "definition": "在自动流程的指定节点引入人工判断、确认或纠偏的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "human-in-the-loop",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "multi-agent systems",
+        "agent swarms"
+      ],
+      "definition": "由多个 Agent 分工、协作并交换任务状态的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "multi-agent",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "telemetry",
+        "distributed tracing"
+      ],
+      "definition": "利用遥测信号理解系统内部状态和行为的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "observability",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "Prompt Engineering",
+        "Prompt engineering",
+        "prompt engineering"
+      ],
+      "definition": "通过设计和验证输入指令来约束模型任务行为的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "prompt-engineering",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "retrieval augmented generation",
+        "rag"
+      ],
+      "definition": "在生成前检索外部资料并把受控结果加入模型上下文的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "retrieval-augmented-generation",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "agent sandboxing",
+        "isolated execution"
+      ],
+      "definition": "通过隔离文件、网络、进程和权限限制执行影响的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "sandboxing",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "self healing",
+        "automatic remediation"
+      ],
+      "definition": "系统在明确边界内诊断故障、尝试恢复并独立验证结果的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "self-healing",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "structured outputs",
+        "schema-constrained output"
+      ],
+      "definition": "让模型结果遵循明确字段和可验证 Schema 的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "structured-output",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "Tool Calling",
+        "tool calling"
+      ],
+      "definition": "模型按结构化协议选择并请求外部工具执行的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "tool-calling",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "Tool Use",
+        "tool use"
+      ],
+      "definition": "智能系统在任务中使用外部能力获取信息或产生动作的方法。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "tool-use",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "method"
+    },
+    {
+      "aliases": [
+        "Context Window",
+        "context window"
+      ],
+      "definition": "模型可接收和利用的上下文容量及其带来的工程约束。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "context-window",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "problem"
+    },
+    {
+      "aliases": [
+        "Cost"
+      ],
+      "definition": "构建、运行和维护系统所消耗的计算、时间与组织资源。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "cost",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "problem"
+    },
+    {
+      "aliases": [
+        "performance engineering"
+      ],
+      "definition": "系统在资源约束下的延迟、吞吐和效率表现。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "performance",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "problem"
+    },
+    {
+      "aliases": [
+        "Reliability"
+      ],
+      "definition": "系统在预期条件下持续产生正确且可复核结果的能力。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "reliability",
+      "relatedInsightIds": [
+        "insight-44e68c98d99871735274ed68",
+        "insight-59498e27cf7aac1a9e4f9a76"
+      ],
+      "relatedTopicIds": [
+        "reliable-agent-delivery"
+      ],
+      "type": "problem"
+    },
+    {
+      "aliases": [
+        "Security"
+      ],
+      "definition": "保护系统、数据和执行边界免受未授权访问或滥用。",
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "name": "security",
+      "relatedInsightIds": [],
+      "relatedTopicIds": [],
+      "type": "problem"
+    }
+  ],
+  "topics": [
+    {
+      "currentMemberInsightIds": [
+        "insight-59498e27cf7aac1a9e4f9a76",
+        "insight-44e68c98d99871735274ed68"
+      ],
+      "domains": [
+        "software-engineering",
+        "model-research"
+      ],
+      "id": "reliable-agent-delivery",
+      "name": "可靠 Agent 交付",
+      "scope": "Agent 变更如何绑定冻结输入、独立验证与最终准入。",
+      "tagFilters": [
+        {
+          "anyOf": [
+            "reliability"
+          ],
+          "tagType": "problem"
+        }
+      ],
+      "version": 3
+    }
+  ]
+}
