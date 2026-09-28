@@ -90,6 +90,18 @@ HTTPS 入口；保留发行版、组件、签名密钥和 APT 完整性校验，
 只验证网站输入发布候选。本仓库测试可以重复验证工作流结构和本地 Git fixture，但真实 GitHub
 App 权限、Ruleset 叠加及同 SHA fast-forward 仍属于后续 GitHub 环境验收。
 
+## 发布治理
+
+普通代码变更通过 Pull Request 交付，必须通过 GitHub Actions 的 `npm run gate` 与
+`deployment-lab`。内容发布由专用 Devhot Site Publisher App 创建 `publication/<id>`
+候选；候选通过其精确 SHA 的 `publication-gate`
+后，发布端重新核对 main 基线，再将 main 快进到同一个候选 SHA。
+
+代码协作、发布检查、历史保护和候选命名空间由独立 Ruleset 约束。发布 App 不能绕过发布检查或历史保护；指定维护者
+`dicoeeee`
+仅在通过代码门禁的 PR 合入时豁免发布检查，不获得直接推送或强推 main 的例外。真实环境的验收状态见
+[devhot #81](https://github.com/dicoeeee/devhot/issues/81)。
+
 ## 输入与内容边界
 
 ```text
