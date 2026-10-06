@@ -48,3 +48,9 @@ export const calculatePublicationInputIdentity = ({
 
 export const publicationIdFor = (inputIdentity: string): string =>
   `candidate-${inputIdentity.slice(0, 24)}`;
+
+/** 对公开全文投影进行规范 JSON 哈希，保留数组顺序与全部字符串字符。 */
+export const calculateSourceContentSha256 = (content: readonly unknown[]): string =>
+  createHash("sha256")
+    .update(JSON.stringify(canonicalize(content)))
+    .digest("hex");

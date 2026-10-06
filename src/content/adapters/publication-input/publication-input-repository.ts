@@ -191,7 +191,7 @@ export const createPublicationInputRepository = (
       keyInterpretation: insight.keyInterpretation,
       domainImplications: insight.domainImplications,
       tags: insight.tags.map((tag) => ({ ...tag })),
-      citations: insight.citations.map((citation) => ({
+      citations: (insight.citations ?? []).map((citation) => ({
         evidenceId: citation.evidenceId,
         quote: citation.quote,
       })),

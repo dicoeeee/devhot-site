@@ -24,12 +24,15 @@ import { join } from "node:path";
 
 import {
   calculatePublicationInputIdentity,
+  calculateSourceContentSha256,
   publicationIdFor,
 } from "../../src/content/adapters/publication-input/publication-identity";
 
 interface PublicationFixtureOptions {
   readonly danglingLogoReference?: boolean;
   readonly evidenceReadingContract?: boolean;
+  readonly articleProvenanceContract?: boolean;
+  readonly optionalReferences?: "missing" | "empty" | "present";
   readonly omitRequiredArchiveEvidence?: boolean;
   readonly duplicateEditorialDomain?: "model-research" | "software-engineering";
   readonly emptyTopic?: boolean;
@@ -79,6 +82,8 @@ const sha256 = (value: string | Uint8Array): string =>
 export const writePublicationFixture = async (
   options: PublicationFixtureOptions = {},
 ) => {
+  const evidenceReadingContract =
+    options.evidenceReadingContract || options.articleProvenanceContract;
   const root = await mkdtemp(join(tmpdir(), "devhot-site-input-"));
   createdFixtureRoots.push(root);
   // 测试内创建时注册用例级回收（beforeAll 等钩子中无法注册，由文件级
@@ -250,8 +255,8 @@ export const writePublicationFixture = async (
           ],
         },
   );
-  const insight = JSON.stringify({
-    schemaVersion: options.evidenceReadingContract ? 2 : 1,
+  let insight = JSON.stringify({
+    schemaVersion: evidenceReadingContract ? 2 : 1,
     id: insightId,
     sourceId,
     domain: "software-engineering",
@@ -278,7 +283,7 @@ export const writePublicationFixture = async (
                         },
                       ],
               },
-              ...(options.evidenceReadingContract
+              ...(evidenceReadingContract
                 ? [
                     {
                       kind: "source_image",
@@ -329,7 +334,7 @@ export const writePublicationFixture = async (
           : "Reliable agents use immutable inputs",
       },
     ],
-    ...(options.evidenceReadingContract
+    ...(evidenceReadingContract
       ? {
           relations: {
             deterministic: Array.from(
@@ -364,14 +369,14 @@ export const writePublicationFixture = async (
     officialUrl: "https://example.com/reliable-agent-1",
   });
   const source = JSON.stringify({
-    schemaVersion: options.evidenceReadingContract ? 2 : 1,
+    schemaVersion: evidenceReadingContract ? 2 : 1,
     id: sourceId,
     insightId,
     source: { id: "fixture-source", name: "Fixture Source" },
     title: "Reliable agent architecture 1",
     officialUrl: "https://example.com/reliable-agent-1",
     contentDate: { value: "2026-08-11T08:00:00+00:00", basis: "published_at" },
-    ...(options.evidenceReadingContract
+    ...(evidenceReadingContract
       ? {
           content: [
             { kind: "text", text: "Reliable agents use immutable inputs." },
@@ -395,7 +400,7 @@ export const writePublicationFixture = async (
         }),
     insightUrl: `/insights/${insightId}/`,
   });
-  const modelInsight = JSON.stringify({
+  let modelInsight = JSON.stringify({
     ...JSON.parse(insight),
     id: modelInsightId,
     sourceId: modelSourceId,
@@ -431,7 +436,7 @@ export const writePublicationFixture = async (
         },
       ],
     },
-    ...(options.evidenceReadingContract
+    ...(evidenceReadingContract
       ? {
           relations: { deterministic: [], modelDerived: [] },
         }
@@ -445,12 +450,36 @@ export const writePublicationFixture = async (
     title: "Reliable model architecture 2",
     officialUrl: "https://example.com/reliable-model-2",
     insightUrl: `/insights/${modelInsightId}/`,
-    ...(options.evidenceReadingContract
+    ...(evidenceReadingContract
       ? {
           content: [{ kind: "text", text: "Reliable model evaluation source." }],
         }
       : {}),
   });
+  if (options.articleProvenanceContract) {
+    const articleInsight = (insightJson: string, sourceJson: string): string => {
+      const value = JSON.parse(insightJson);
+      const sourceValue = JSON.parse(sourceJson);
+      value.schemaVersion = 3;
+      value.provenance = {
+        sourceId: sourceValue.id,
+        contentSha256: sourceValue.archive.contentSha256,
+        sourceContentSha256: calculateSourceContentSha256(sourceValue.content),
+        analysisFingerprint: "c".repeat(64),
+      };
+      if (options.optionalReferences !== "present") {
+        for (const block of value.mechanism.blocks) {
+          if (options.optionalReferences === "empty") block.evidenceRefs = [];
+          else delete block.evidenceRefs;
+        }
+        if (options.optionalReferences === "empty") value.citations = [];
+        else delete value.citations;
+      }
+      return JSON.stringify(value);
+    };
+    insight = articleInsight(insight, source);
+    modelInsight = articleInsight(modelInsight, modelSource);
+  }
   const fallbackSource = JSON.stringify({
     schemaVersion: 2,
     id: fallbackSourceId,
@@ -821,7 +850,11 @@ export const writePublicationFixture = async (
       publicationId,
       candidate: { baselineSha, inputIdentity },
       builderCompatibility: {
-        min: options.tagDetailContract ? "0.4.0" : "0.2.0",
+        min: options.articleProvenanceContract
+          ? "0.7.0"
+          : options.tagDetailContract
+            ? "0.4.0"
+            : "0.2.0",
         maxExclusive: "1.0.0",
       },
       entrypoints,

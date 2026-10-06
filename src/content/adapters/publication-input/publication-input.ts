@@ -99,9 +99,15 @@ export interface ContentDatePublicationInput {
 }
 
 export interface InsightPublicationInput {
-  readonly schemaVersion: 1 | 2;
+  readonly schemaVersion: 1 | 2 | 3;
   readonly id: string;
   readonly sourceId: string;
+  readonly provenance?: {
+    readonly sourceId: string;
+    readonly contentSha256: string;
+    readonly sourceContentSha256: string;
+    readonly analysisFingerprint: string;
+  };
   readonly domain: string;
   readonly domains?: readonly EditorialDomainId[];
   readonly title: string;
@@ -115,7 +121,7 @@ export interface InsightPublicationInput {
       readonly assetPath?: string;
       readonly alt?: string;
       readonly caption?: string;
-      readonly evidenceRefs: readonly {
+      readonly evidenceRefs?: readonly {
         readonly evidenceId: string;
         readonly quote: string;
       }[];
@@ -124,7 +130,7 @@ export interface InsightPublicationInput {
   readonly keyInterpretation: string;
   readonly domainImplications: string;
   readonly tags: readonly { readonly type: string; readonly name: string }[];
-  readonly citations: readonly {
+  readonly citations?: readonly {
     readonly sourceId: string;
     readonly evidenceId: string;
     readonly quote: string;
