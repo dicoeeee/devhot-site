@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from host_config import HostConfig
 from host_daemon import subordinate_ranges_safe
+from host_sockets import api_socket_matches
 
 REAL_HOST_ACCEPTANCE = [
     "user_authorization",
@@ -83,13 +84,7 @@ def assess_host(config: HostConfig, evidence: dict, *, require_disabled_timer: b
     )
     require(
         "socket",
-        lambda: (
-            evidence["socket"]["canonical"] is True
-            and evidence["socket"]["kind"] == "socket"
-            and evidence["socket"]["uid"] == config.uid
-            and evidence["socket"]["gid"] == config.gid
-            and evidence["socket"]["mode"] in (0o600, 0o660)
-        ),
+        lambda: api_socket_matches(evidence["socket"], config.uid, config.gid),
     )
     identity = config.rootlesskit
     require(

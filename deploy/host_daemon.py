@@ -29,6 +29,20 @@ def daemon_argv(config):
         "/usr/bin/dockerd-rootless.sh",
         "--host=unix://" + str(config.socket),
         "--config-file=/etc/devhot-site/daemon.json",
+        "--group=0",
+    ]
+
+
+def runtime_argv(config):
+    return [
+        "/usr/bin/env",
+        "-i",
+        "PATH=" + daemon_path(config),
+        "/usr/bin/python3",
+        "-E",
+        "-s",
+        "-B",
+        str(config.tool_root / "deploy/host_runtime.py"),
     ]
 
 
@@ -41,6 +55,7 @@ ConditionUser=devhot-site
 Type=notify
 NotifyAccess=all
 WorkingDirectory=/
+ExecStartPre={" ".join(runtime_argv(config))}
 ExecStart={" ".join(daemon_argv(config))}
 Delegate=yes
 KillMode=mixed
@@ -73,6 +88,15 @@ def effective_start_matches(config, value):
     return argv == expected
 
 
+def effective_runtime_matches(config, value):
+    match = re.match(r"^\{ path=/usr/bin/env ; argv\[\]=(.*?) ; ignore_errors=no ; ", value)
+    return (
+        match is not None
+        and value.count("{ path=") == 1
+        and match[1].split() == runtime_argv(config)
+    )
+
+
 def process_identity(proc):
     status = dict(
         line.split(":", 1) for line in (proc / "status").read_text().splitlines() if ":" in line
@@ -102,12 +126,18 @@ def trusted_launch_files(config):
         # The official launcher prefers this alternative name before rootlesskit.
         if os.path.lexists(path / "docker-rootlesskit"):
             return False
-    return all(
-        trusted(path, executable=True)
-        for path in (
-            Path("/usr/bin/env"),
-            Path("/usr/bin/dockerd-rootless.sh"),
-            Path("/bin/sh").resolve(),
+    runtime = config.tool_root / "deploy/host_runtime.py"
+    return (
+        trusted(runtime)
+        and runtime.is_file()
+        and all(
+            trusted(path, executable=True)
+            for path in (
+                Path("/usr/bin/env"),
+                Path("/usr/bin/dockerd-rootless.sh"),
+                Path("/bin/sh").resolve(),
+                Path("/usr/bin/python3").resolve(),
+            )
         )
     )
 

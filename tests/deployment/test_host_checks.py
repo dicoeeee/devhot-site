@@ -16,6 +16,59 @@ healthy_host, instance = fixtures.healthy_host, fixtures.instance
 
 
 class HostChecksTests(unittest.TestCase):
+    def test_daemon_accepts_only_one_fixed_metrics_and_one_verified_libnetwork_socket(self):
+        policy = importlib.import_module("host_sockets").socket_policy
+        tcp = "sl local_address rem_address st tx_queue rx_queue tr tm retr uid timeout inode\n"
+        header = "Num RefCount Protocol Flags Type St Inode Path\n"
+        api = "/run/user/1001/docker.sock"
+        metrics = "/run/user/1001/docker/metrics.sock"
+        libnetwork = "/run/user/1001/docker/libnetwork/0123456789ab.sock"
+
+        def check(paths, verified=True):
+            rows = [
+                f"000: 2 0 00010000 0001 01 {index + 42} {path}\n"
+                for index, path in enumerate(paths)
+            ]
+            return policy(
+                {str(i + 42) for i in range(len(paths))},
+                [tcp, tcp],
+                header + "".join(rows),
+                api,
+                internal_socket_check=lambda path: verified,
+            )
+
+        self.assertTrue(check([api, metrics, libnetwork]))
+        self.assertTrue(check([api, metrics]))
+        self.assertFalse(check([api, metrics], verified=False))
+        self.assertFalse(check([api, metrics, metrics]))
+        self.assertFalse(
+            check([api, libnetwork, libnetwork.replace("0123456789ab", "123456789abc")])
+        )
+        self.assertFalse(check([api, "/run/user/1001/docker/unknown.sock"]))
+        self.assertFalse(check([api, metrics.replace("/docker/", "/docker/libnetwork/")]))
+
+    def test_sticky_api_socket_preserves_identity_and_rejects_other_special_bits(self):
+        config = importlib.import_module("host_config").parse_config(instance())
+        assess = importlib.import_module("host_checks").assess_host
+        for mode in (0o1600, 0o1660):
+            evidence = healthy_host()
+            evidence["socket"]["mode"] = mode
+            self.assertEqual(assess(config, evidence)["status"], "passed")
+        for key, value in (
+            ("mode", 0o2660),
+            ("mode", 0o4660),
+            ("mode", 0o1666),
+            ("mode", 0o1760),
+            ("gid", 232072),
+        ):
+            with self.subTest(key=key, value=value):
+                evidence = healthy_host()
+                evidence["socket"][key] = value
+                report = assess(config, evidence)
+                self.assertEqual(
+                    next(c for c in report["checks"] if c["id"] == "socket")["status"], "failed"
+                )
+
     def test_every_subordinate_range_must_be_safe_not_just_one(self):
         config = importlib.import_module("host_config").parse_config(instance())
         assess = importlib.import_module("host_checks").assess_host

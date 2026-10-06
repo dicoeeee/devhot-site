@@ -12,6 +12,44 @@ fixtures = importlib.import_module("host_fixtures")
 
 
 class HostDaemonTests(unittest.TestCase):
+    def test_generated_daemon_prepares_private_ipc_on_every_start_with_exact_command(self):
+        module = importlib.import_module("host_daemon")
+        config = importlib.import_module("host_config").parse_config(fixtures.instance())
+        unit = module.daemon_unit(config)
+        self.assertIn("ExecStartPre=/usr/bin/env -i PATH=", unit)
+        self.assertIn("/usr/bin/python3 -E -s -B /opt/devhot-site/deploy/host_runtime.py", unit)
+        argv = module.runtime_argv(config)
+        value = "{ path=/usr/bin/env ; argv[]=" + " ".join(argv) + " ; ignore_errors=no ; }"
+        self.assertTrue(module.effective_runtime_matches(config, value))
+        self.assertFalse(module.effective_runtime_matches(config, ""))
+        self.assertFalse(module.effective_runtime_matches(config, value + value))
+        self.assertFalse(
+            module.effective_runtime_matches(config, value.replace("host_runtime.py", "host.py"))
+        )
+        self.assertFalse(module.effective_runtime_matches(config, value.replace(" -i ", " ")))
+        self.assertFalse(
+            module.effective_runtime_matches(
+                config, value.replace("ignore_errors=no", "ignore_errors=yes")
+            )
+        )
+
+    def test_daemon_api_uses_namespace_group_zero_not_a_remapped_host_group(self):
+        module = importlib.import_module("host_daemon")
+        config = importlib.import_module("host_config").parse_config(fixtures.instance())
+        unit = module.daemon_unit(config)
+        self.assertIn(" --group=0", unit)
+        argv = module.daemon_argv(config)
+        value = "{ path=/usr/bin/env ; argv[]=" + " ".join(argv) + " ; ignore_errors=no ; }"
+        self.assertTrue(module.effective_start_matches(config, value))
+        self.assertFalse(
+            module.effective_start_matches(config, value.replace("--group=0", "--group=1001"))
+        )
+        self.assertFalse(
+            module.effective_start_matches(
+                config, value.replace("--group=0", "--group=devhot-site")
+            )
+        )
+
     def test_effective_service_rejects_user_path_alternative_commands_and_environment(self):
         module = importlib.import_module("host_daemon")
         config = importlib.import_module("host_config").parse_config(fixtures.instance())

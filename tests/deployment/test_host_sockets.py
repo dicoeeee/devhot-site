@@ -12,6 +12,48 @@ from host_sockets import protected_ipc_socket
 
 
 class HostSocketTests(unittest.TestCase):
+    def test_metrics_socket_requires_private_ancestor_and_same_namespace_identity(self):
+        with tempfile.TemporaryDirectory(prefix="i112-", dir="/tmp") as directory:
+            root = pathlib.Path(directory)
+            host, child = root / "host", root / "child"
+            logical = "/run/user/1/docker/metrics.sock"
+            target = host / logical.lstrip("/")
+            target.parent.mkdir(parents=True)
+            target.parent.chmod(0o700)
+            (child / "run").mkdir(parents=True)
+            (child / "run/user").symlink_to(host / "run/user", target_is_directory=True)
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(target))
+                listener.listen()
+                target.chmod(0o777)
+                os.chown(target, -1, os.getgid())
+
+                def check():
+                    return protected_ipc_socket(
+                        child, logical, os.getuid(), os.getgid(), host_root=host
+                    )
+
+                self.assertTrue(check())
+                target.parent.chmod(0o755)
+                self.assertFalse(check())
+                target.parent.parent.chmod(0o700)
+                self.assertTrue(check())
+                target.chmod(0o1777)
+                self.assertFalse(check())
+                target.chmod(0o777)
+                self.assertFalse(
+                    protected_ipc_socket(
+                        child, logical, os.getuid(), os.getgid() + 1, host_root=host
+                    )
+                )
+                (child / "run/user").unlink()
+                replacement = child / logical.lstrip("/")
+                replacement.parent.mkdir(parents=True)
+                with socket.socket(socket.AF_UNIX) as other:
+                    other.bind(str(replacement))
+                    replacement.chmod(0o777)
+                    self.assertFalse(check())
+
     def test_ipc_requires_same_protected_socket_across_copy_up(self):
         with tempfile.TemporaryDirectory(prefix="i84-", dir="/tmp") as directory:
             root = pathlib.Path(directory)

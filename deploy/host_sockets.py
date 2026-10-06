@@ -1,10 +1,21 @@
-"""Distinguish the fixed Docker API from its necessary private libnetwork IPC."""
+"""Distinguish the fixed Docker API from its precisely allowed private IPC."""
 
 from __future__ import annotations
 
 import re
 import stat
 from pathlib import Path
+
+
+def api_socket_matches(value: dict, uid: int, gid: int) -> bool:
+    """Docker marks runtime sockets sticky; no other special bits are allowed."""
+    return (
+        value.get("canonical") is True
+        and value.get("kind") == "socket"
+        and value.get("uid") == uid
+        and value.get("gid") == gid
+        and value.get("mode") in (0o600, 0o660, 0o1600, 0o1660)
+    )
 
 
 def protected_ipc_socket(
@@ -16,6 +27,7 @@ def protected_ipc_socket(
         if not parts or parts[0] != "/" or ".." in parts:
             return False
         parent = host_root
+        private_ancestor = False
         for component in parts[1:-1]:
             parent = parent / component
             value = parent.lstat()
@@ -25,8 +37,14 @@ def protected_ipc_socket(
                 or value.st_mode & 0o022
             ):
                 return False
+            private_ancestor |= value.st_uid == uid and stat.S_IMODE(value.st_mode) in (
+                0o700,
+                0o1700,
+            )
         value = (parent / parts[-1]).lstat()
         observed = (root / path.lstrip("/")).stat()
+        metrics = re.fullmatch(r"/run/user/[0-9]+/docker/metrics\.sock", path) is not None
+        allowed_modes = (0o600, 0o777) if metrics and private_ancestor else (0o600,)
 
         def identity(item):
             return (item.st_dev, item.st_ino, item.st_uid, item.st_gid, item.st_mode)
@@ -35,7 +53,8 @@ def protected_ipc_socket(
             stat.S_ISSOCK(value.st_mode)
             and value.st_uid == uid
             and value.st_gid == gid
-            and stat.S_IMODE(value.st_mode) == 0o600
+            and stat.S_IMODE(value.st_mode) in allowed_modes
+            and (not metrics or private_ancestor)
             and identity(value) == identity(observed)
             and identity(value) == identity((parent / parts[-1]).lstat())
         )
@@ -79,9 +98,14 @@ def socket_policy(
         return False
     internal = [path for path in listeners if path != socket]
     pattern = re.escape(str(Path(socket).parent / "docker/libnetwork")) + r"/[0-9a-f]{12}\.sock"
-    return len(internal) <= 1 and all(
-        re.fullmatch(pattern, path) is not None
-        and internal_socket_check is not None
-        and internal_socket_check(path) is True
-        for path in internal
+    metrics = str(Path(socket).parent / "docker/metrics.sock")
+    return (
+        len(internal) == len(set(internal))
+        and sum(re.fullmatch(pattern, path) is not None for path in internal) <= 1
+        and all(
+            (path == metrics or re.fullmatch(pattern, path) is not None)
+            and internal_socket_check is not None
+            and internal_socket_check(path) is True
+            for path in internal
+        )
     )

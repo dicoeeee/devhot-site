@@ -15,6 +15,7 @@ from pathlib import Path
 from host_config import HostConfig, unit_files
 from host_daemon import (
     daemon_argv,
+    effective_runtime_matches,
     effective_start_matches,
     namespace_map_matches,
     process_children,
@@ -30,7 +31,8 @@ from host_io import (
     secure_directory_ancestors,
     trusted,
 )
-from host_sockets import protected_ipc_socket, socket_policy
+from host_sockets import api_socket_matches, protected_ipc_socket, socket_policy
+from host_units import installed_unit_matches
 from release_store import DeploymentError
 
 
@@ -88,7 +90,7 @@ class HostProbe:
             "--user",
             "show",
             name,
-            "--property=LoadState,ActiveState,UnitFileState,MainPID,Result,FragmentPath,DropInPaths,ExecStart,EnvironmentFiles,RootDirectory,RootImage,ExecMainStartTimestampMonotonic",
+            "--property=LoadState,ActiveState,UnitFileState,MainPID,Result,FragmentPath,DropInPaths,ExecStart,ExecStartPre,EnvironmentFiles,RootDirectory,RootImage,ExecMainStartTimestampMonotonic",
         )
         return dict(line.split("=", 1) for line in result.stdout.splitlines() if "=" in line)
 
@@ -101,18 +103,16 @@ class HostProbe:
         service = self.service("docker.service")
         unit = Path("/etc/systemd/user/docker.service")
         launch_valid = (
-            trusted(unit)
-            and unit.read_text() == unit_files(config)["docker.service"]
-            and service.get("FragmentPath") == str(unit)
-            and service.get("DropInPaths") == ""
+            installed_unit_matches("docker.service", unit_files(config)["docker.service"], service)
             and service.get("EnvironmentFiles") == ""
             and service.get("RootDirectory") == ""
             and service.get("RootImage") == ""
             and effective_start_matches(config, service.get("ExecStart", ""))
+            and effective_runtime_matches(config, service.get("ExecStartPre", ""))
             and trusted_launch_files(config)
             and read_root_json(Path("/etc/devhot-site/daemon.json"), config.gid) == {}
             and before["argv"][0] in (str(path), "rootlesskit")
-            and before["argv"][-3:] == daemon_argv(config)[-3:]
+            and before["argv"][-4:] == daemon_argv(config)[-4:]
         )
         capabilities = self.command("/usr/sbin/getcap", str(path)).stdout.strip().split()
         started = time.time_ns() - int(
@@ -129,6 +129,8 @@ class HostProbe:
             Path("/usr/bin/env"),
             Path("/bin/sh").resolve(),
             Path("/etc/devhot-site/daemon.json"),
+            config.tool_root / "deploy/host_runtime.py",
+            Path("/usr/bin/python3").resolve(),
         )
         after = process_identity(proc)
         latest = self.service("docker.service")
@@ -301,14 +303,8 @@ class HostProbe:
 
         def units_match():
             for name, content in unit_files(config).items():
-                path = Path("/etc/systemd/user") / name
                 observed = self.service(name)
-                if (
-                    not trusted(path)
-                    or path.read_text() != content
-                    or observed.get("FragmentPath") != str(path)
-                    or observed.get("DropInPaths") != ""
-                ):
+                if not installed_unit_matches(name, content, observed):
                     return False
             return True
 
@@ -350,10 +346,7 @@ class HostProbe:
         identity = result.get("rootlesskit") or {}
         # Do not contact a rootful or unverified endpoint merely to inspect its info.
         if (
-            socket.get("canonical") is True
-            and socket.get("kind") == "socket"
-            and socket.get("uid") == config.uid
-            and socket.get("mode") in (0o600, 0o660)
+            api_socket_matches(socket, config.uid, config.gid)
             and identity.get("launch_chain_valid") is True
             and identity.get("pid_stable") is True
             and identity.get("started_after_files") is True
