@@ -55,15 +55,27 @@ namespace 映射、cgroup v2/systemd 的 memory/pids 控制、Rootless daemon �
 API、RootlessKit 身份与唯一 capability、目录模式与同文件系统、空 Docker 客户端配置、指定 IP 和原样安装的 user
 units。额外 unit drop-in 或用户覆盖也会拒绝。
 
+Issue #112 补充 Ubuntu 24.04 与官方 Docker CE
+29.8.2 的兼容检查；最终真实主机与网站验收仍由环境票负责。systemd 的 `FragmentPath` 只接受
+`/etc/systemd/user/<name>`，或 root 所有的标准 `/etc/xdg/systemd/user`
+目录别名。只接受直接目标 `../../systemd/user` 或
+`/etc/systemd/user`，不能经过可写中间链接。别名全链路必须受信，最终目录必须是原安装目录，文件 basename、device/inode、内容与读取前后身份必须一致；同内容的复制文件不算原安装 unit。
+
 Docker 观察使用明确的 `/run/user/<UID>/docker.sock` 和 root 创建的空目录
 `/etc/devhot-site/docker-client`，不读取用户 Docker 配置、凭据或 context。RootlessKit 带文件 capability 时，内核通常拒绝非特权程序读取父进程
 `/proc/PID/exe`。因此使用 root 所有的固定 user
 unit、绝对启动脚本、净化后的 PATH/环境、systemd 有效配置，以及稳定 PID/starttime 和磁盘文件身份建立
-`trusted_launch_chain` 证据；不把它称为直接读取运行中 exe
-inode。遍历全部线程的子进程，核对 dockerd 的 namespace、描述符及实际监听 socket，不读取进程环境。固定 Docker
-API 之外，只允许 dockerd 自有的 `/run/user/<UID>/docker/libnetwork/<12hex>.sock`
-内部 IPC：Unix stream、专用 UID/GID、0600、受保护宿主父目录，并比对进程 mount
-namespace 中同路径的 device/inode/权限身份。RootlessKit 的 `/run`
+`trusted_launch_chain` 证据；不把它称为直接读取运行中 exe inode。固定启动链同时核对唯一
+`ExecStartPre`
+目录准备命令及其受信 Python/helper 文件。遍历全部线程的子进程，核对 dockerd 的 namespace、描述符及实际监听 socket，不读取进程环境。固定 Docker
+API 之外，只允许至多一个 dockerd 自有的 `/run/user/<UID>/docker/libnetwork/<12hex>.sock`
+和一个固定
+`/run/user/<UID>/docker/metrics.sock`；拒绝重复、未知和不可读端点。两者均须为 Unix
+stream、专用 UID/GID、受保护宿主父目录，并比对进程 mount
+namespace 中同路径的 device/inode/权限身份。libnetwork socket 仍只接受
+`0600`；metrics 只接受 `0600/0777`，且必须有专用 UID 所有的 `0700/01700`
+私有祖先，阻止其他账号遍历。不能把所有 `0777` Unix socket 都视为安全。RootlessKit 的
+`/run`
 copy-up 链接只有在最终对象与已验证宿主 socket 完全一致时才能通过；未知端点或不可读状态仍拒绝。若主机安全策略阻止必要观察，检查报告缺口，由 #85 决定适用方案，不自动放宽策略。网络端点检查同时拒绝 daemon 的 IPv4/IPv6
 TCP API。
 
@@ -97,10 +109,16 @@ TCP API。
    `/usr/bin/env -i`
    清除 user-manager 隐式环境，只传固定 HOME、PATH、runtime 和通知 socket，并明确指定唯一 Unix
    host 与 root 所有的空 daemon 配置。不能存在用户目录的 docker.service 覆盖、drop-in 或优先解析的
-   `docker-rootlesskit`。需要管理员显式批准 linger 与 daemon 启动。非登录账号的 user-manager 进入方法参见 Docker 官方 troubleshooting。不能用系统级
+   `docker-rootlesskit`。固定 daemon 参数包含 `--group=0`，使 user namespace GID
+   0 映射为专用主 GID；不能改成宿主 GID 或组名。每次启动的 `ExecStartPre`
+   以同一专用账号运行受信 `host_runtime.py`，使用 no-follow 目录描述符检查
+   `/run/user/<UID>`，新建并验证 `docker/libnetwork` 为 `0700`。已有 `docker` 可为
+   `0700/01700`；已有 libnetwork 必须为
+   `0700`。既有错误身份、模式或符号链接均失败，不自动 chmod。需要管理员显式批准 linger 与 daemon 启动。非登录账号的 user-manager 进入方法参见 Docker 官方 troubleshooting。不能用系统级
    `User=devhot-site` 的 rootful 服务代替。通过受信执行链、稳定
    `MainPID`/starttime 和文件变更时间关联确认已固定的 RootlessKit，API 仅监听用户本地 Unix
-   socket，socket 为专用 UID/GID、0600 或 0660。Docker daemon 不得暴露 TCP API。
+   socket，socket 为专用 UID/GID、`0600/0660/01600/01660`。Docker 在 runtime
+   socket 上设置 sticky bit，其他特殊位仍拒绝。Docker daemon 不得暴露 TCP API。
 5. 管理员准备以下目录。候选与 releases 必须同文件系统；runtime 每次开机由用户 manager 创建。账号 home/Rootless
    daemon 自有数据也必须私有，不能借用 Devhot 工作区。`/etc/devhot-site/docker-client`
    必须为空、root 所有且账号只读。发布、状态和 runtime 路径的所有祖先也必须由 root 或专用 UID 所有，且不能由组或其他用户写入；工具路径继续要求全链路 root 所有。
@@ -122,6 +140,7 @@ TCP API。
    `/opt/devhot-site`；root 所有，普通文件 0644、目录 0755，不允许符号链接或可写父目录。执行前确认工具来源，不以 root 执行用户可改写的 staging 脚本。将实例配置安装为上述 0640，并在管理员批准的防火墙上仅放行指定 LAN
    IPv4 与获准客户端网段的 TCP 80，拒绝其他接口/网段和 IPv6。绑定 LAN
    IP 本身不能代替防火墙验收。
+
 7. 管理员运行安装检查；只有显式 `--apply`
    才写文件。首次安装要求目标不存在，不覆盖任何已有 unit、启用链接或实例 Compose；更新须另行审核。
 
@@ -153,6 +172,31 @@ disabled/inactive。没有成功回读前不能把安装材料称为主机可运
 101、cap-drop ALL、no-new-privileges、只读根、64 MiB
 `/tmp`、三个只读挂载、独立普通 bridge 网络及唯一指定 LAN IP:80 →
 8080；不匹配时拒绝并保留现状。
+
+### 从旧部署材料迁移与回滚
+
+新 unit 增加启动前准备和固定
+`--group=0`；旧 unit 与新检查器不能混用。安装器仍只接受空目标，不自动覆盖现有材料。
+
+管理员先确认完整门禁与合入后 main
+CI，记录新旧 SHA 和材料校验值，停止网站部署、timer 与专用 Docker，确认没有仍运行的部署进程或容器，再备份旧 root 所有源码、三个 user
+units 与生成的 JSON。停用只用于迁移窗口；已批准的定时器必须记录原状态，首次验收未完成的定时器继续保持 disabled。
+
+旧 daemon 若留下 `docker/libnetwork` 的 `0600`
+目录，管理员需在 daemon 停止后检查目录、所有权及内容。目录内容只能是已停止 daemon 的预期 socket；出现普通文件、符号链接、未知内容或活动 listener 时停止迁移。确认后显式清理这些失效 socket，移除空目录，由新的启动前材料创建
+`0700` 目录；不在运行中修正模式，也不让 `check`
+修复权限。保留 Docker 数据目录、发布版本和状态，不能为迁移清空它们。
+
+按管理员审批恢复空安装目标，安装完整新工具与生成材料，执行用户 manager
+daemon-reload，先启动专用 Docker，再以专用账号执行完整
+`host.py check`。启动失败、完整检查失败或身份观察不可读时，网站和 timer 不启动。每次重启均须重新验证 libnetwork 为
+`0700` 与 API 专用 GID，随后才进入环境票的网站构建、回滚和计划部署验收。
+
+回滚时先停止专用 Docker 与网站部署，再恢复同一旧 SHA 的完整工具和对应 unit/JSON，daemon-reload 后重做该版本要求的检查。旧版本在此 Ubuntu/Docker 组合上的已知门禁仍可能失败；这种情况下保持暂停，不能因回滚而跳过检查或自动恢复 timer。
+
+本次兼容依据绑定到官方
+[Moby 8af9fe3a36bab3e039862a2ab1cef1880c9b4d03](https://github.com/moby/moby/commit/8af9fe3a36bab3e039862a2ab1cef1880c9b4d03)：[API sticky 行为](https://github.com/moby/moby/blob/8af9fe3a36bab3e039862a2ab1cef1880c9b4d03/daemon/listeners/listeners_linux.go#L35-L53)、[metrics 注册](https://github.com/moby/moby/blob/8af9fe3a36bab3e039862a2ab1cef1880c9b4d03/daemon/daemon.go#L1024)与
+[libnetwork 目录模式](https://github.com/moby/moby/blob/8af9fe3a36bab3e039862a2ab1cef1880c9b4d03/daemon/libnetwork/sandbox_externalkey_unix.go#L118-L135)。此处说明受审核兼容契约，不宣称真实主机验收已经通过。
 
 ## 日常命令、失败与恢复
 
