@@ -127,6 +127,21 @@ Astro pages → dist/ → output verifier
 `domains`；声明时必须包含 `domain`。首页按 `domains ?? [domain]`
 判断领域成员，因此交叉领域洞察可以在两个领域首页共享同一详情身份，而不会复制洞察对象或改变报告领域归属。
 
+构建器 0.7.0 兼容旧输入；含 v3 洞察的候选须声明
+`builderCompatibility.min >= 0.7.0`。洞察输入 v3 增加必填文章级
+`provenance`：`sourceId`、`contentSha256`、 `sourceContentSha256` 与
+`analysisFingerprint`。来源必须使用 v2 的首次成功冻结归档；来源身份与原文入口必须一致，`contentSha256`
+必须匹配 `source.archive.contentSha256`。 `sourceContentSha256` 是公开全文
+`source.content` 的规范 JSON
+SHA-256：递归按对象键排序、数组顺序不变、UTF-8、保留原始字符串、无额外空格，与 Python
+`json.dumps(ensure_ascii=False, sort_keys=True, separators=(",", ":"))`
+一致。Validator 在构建前重新计算该哈希，正文或图像投影变动后即使重算 Manifest 也不能沿用旧分析。
+`analysisFingerprint` 绑定 producer 当前有效模型结果的
+`result_fingerprint`；网站只验证其 64 位小写十六进制形状，实际任务、模型、输入和结果归属由 producer 先行核验，私有运行细节不公开。这些摘要保证版本溯源，不证明每项语义判断正确。
+
+v3 的段落 `evidenceRefs` 与 `citations`
+可以缺省或为空；无引用时机制文本、来源图片、Mermaid 和标签仍正常读取，页面不会产生空引用栏目。producer 隔离无效可选引用后投影剩余有效引用；有值时仍校验公开字段形状，各处引用可独立缺省；跨文章来源的可选引用仅从读者投影隔离，已核验的原始输入文件与身份不改写。来源图片须属于当前文章并为 PNG，Mermaid 必须为 SVG，原有资源 SHA-256、SVG 安全与可访问性门禁保持。v1/v2 仍按原版本校验必填段落引用，不修改历史输入。
+
 ## 固定构建运行时
 
 - Node.js：`24.19.0`，官方发布于 2026-08-03。

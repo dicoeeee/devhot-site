@@ -8,6 +8,7 @@ import { listSafeFiles } from "../../../infrastructure/list-safe-files";
 import { insightRoute, sourceArchiveRoute } from "../../model/site-routes";
 import {
   calculatePublicationInputIdentity,
+  calculateSourceContentSha256,
   publicationIdFor,
 } from "./publication-identity";
 import type {
@@ -47,7 +48,7 @@ interface PublicationManifest {
   readonly files: readonly ManifestFile[];
 }
 
-const BUILDER_VERSION = "0.6.0";
+const BUILDER_VERSION = "0.7.0";
 const contractsRoot = join(process.cwd(), "contracts");
 
 const readJson = async (path: string): Promise<unknown> =>
@@ -273,6 +274,12 @@ export const validatePublicationInput = async (
       validatedJson(root, path, validateInsight, `insight input ${path}`),
     ),
   );
+  if (
+    insights.some((insight) => insight.schemaVersion === 3) &&
+    compareVersion(manifest.builderCompatibility.min, "0.7.0") < 0
+  ) {
+    throw new Error("article provenance v3 requires builderCompatibility.min >= 0.7.0");
+  }
   const sources = await Promise.all(
     manifest.entrypoints.sources.map((path) =>
       validatedJson(root, path, validateSource, `source input ${path}`),
@@ -533,21 +540,57 @@ export const validatePublicationInput = async (
       source.insightId !== insight.id ||
       insight.sourceUrl !== sourceArchiveRoute(source.id) ||
       source.insightUrl !== insightRoute(insight.id) ||
-      insight.citations.some((citation) => citation.sourceId !== source.id)
+      (insight.schemaVersion !== 3 &&
+        (insight.citations ?? []).some((citation) => citation.sourceId !== source.id))
     ) {
       throw new Error(`insight/source reference mismatch: ${insight.id}`);
     }
+    if (insight.schemaVersion === 3) {
+      const provenance = insight.provenance;
+      if (
+        source.schemaVersion !== 2 ||
+        !source.archive ||
+        !source.content ||
+        !provenance ||
+        provenance.sourceId !== source.id ||
+        provenance.contentSha256 !== source.archive.contentSha256 ||
+        provenance.sourceContentSha256 !== calculateSourceContentSha256(source.content) ||
+        insight.officialUrl !== source.officialUrl
+      ) {
+        throw new Error(`insight article provenance mismatch: ${insight.id}`);
+      }
+      const sourceImages = new Set(
+        source.content.flatMap((block) =>
+          block.kind === "image" ? [block.assetPath] : [],
+        ),
+      );
+      for (const block of insight.mechanism.blocks) {
+        if (block.kind === "text") continue;
+        const asset = block.assetPath ? assets.get(block.assetPath) : undefined;
+        if (
+          !asset ||
+          (block.kind === "source_image" &&
+            (asset.mediaType !== "image/png" || !sourceImages.has(asset.path))) ||
+          (block.kind === "technical_flow_mermaid" && asset.mediaType !== "image/svg+xml")
+        ) {
+          throw new Error(`insight mechanism asset ownership mismatch: ${insight.id}`);
+        }
+      }
+    }
     const mechanismEvidence = new Set(
       insight.mechanism.blocks.flatMap((block) =>
-        block.evidenceRefs.map(
+        (block.evidenceRefs ?? []).map(
           (reference) => `${reference.evidenceId}\0${reference.quote}`,
         ),
       ),
     );
     const citationEvidence = new Set(
-      insight.citations.map((citation) => `${citation.evidenceId}\0${citation.quote}`),
+      (insight.citations ?? []).map(
+        (citation) => `${citation.evidenceId}\0${citation.quote}`,
+      ),
     );
     if (
+      insight.schemaVersion !== 3 &&
       [...mechanismEvidence].sort().join("\n") !== [...citationEvidence].sort().join("\n")
     ) {
       throw new Error(`insight citation evidence mismatch: ${insight.id}`);
@@ -615,7 +658,20 @@ export const validatePublicationInput = async (
     publicationId: manifest.publicationId,
     candidate: Object.freeze({ ...manifest.candidate }),
     home: Object.freeze(home),
-    insights: Object.freeze(insights),
+    // 文件哈希与原始输入身份已在投影前核验。可选引用不承担 v3 来源权威；
+    // 跨来源引用只从读者投影隔离，不改变原始文件或有效文章内容。
+    insights: Object.freeze(
+      insights.map((insight) =>
+        insight.schemaVersion === 3
+          ? {
+              ...insight,
+              citations: (insight.citations ?? []).filter(
+                (citation) => citation.sourceId === insight.sourceId,
+              ),
+            }
+          : insight,
+      ),
+    ),
     sources: Object.freeze(sources),
     ...(topics ? { topics: Object.freeze(topics) } : {}),
     ...(timeline ? { timeline: Object.freeze(timeline) } : {}),

@@ -15,12 +15,11 @@
     "keyInterpretation",
     "domainImplications",
     "tags",
-    "citations",
     "sourceUrl",
     "officialUrl"
   ],
   "properties": {
-    "schemaVersion": { "enum": [1, 2] },
+    "schemaVersion": { "enum": [1, 2, 3] },
     "id": { "type": "string", "pattern": "^insight-[a-f0-9]{24}$" },
     "sourceId": { "type": "string", "pattern": "^source-[a-f0-9]{24}$" },
     "domain": { "type": "string", "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$" },
@@ -43,18 +42,14 @@
         "blocks": {
           "type": "array",
           "maxItems": 4,
-          "items": { "$ref": "#/$defs/evidenceMechanismBlock" }
+          "items": { "$ref": "#/$defs/articleMechanismBlock" }
         }
       },
       "allOf": [
         {
           "if": { "properties": { "status": { "const": "present" } } },
-          "then": {
-            "properties": { "blocks": { "type": "array", "minItems": 1 } }
-          },
-          "else": {
-            "properties": { "blocks": { "type": "array", "maxItems": 0 } }
-          }
+          "then": { "properties": { "blocks": { "type": "array", "minItems": 1 } } },
+          "else": { "properties": { "blocks": { "type": "array", "maxItems": 0 } } }
         }
       ]
     },
@@ -103,7 +98,23 @@
       }
     },
     "sourceUrl": { "type": "string", "pattern": "^/sources/source-[a-f0-9]{24}/$" },
-    "officialUrl": { "type": "string", "pattern": "^https://" }
+    "officialUrl": { "type": "string", "pattern": "^https://" },
+    "provenance": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sourceId",
+        "contentSha256",
+        "sourceContentSha256",
+        "analysisFingerprint"
+      ],
+      "properties": {
+        "sourceId": { "type": "string", "pattern": "^source-[a-f0-9]{24}$" },
+        "contentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "sourceContentSha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "analysisFingerprint": { "type": "string", "pattern": "^[a-f0-9]{64}$" }
+      }
+    }
   },
   "allOf": [
     {
@@ -122,10 +133,36 @@
                 "items": { "$ref": "#/$defs/legacyMechanismBlock" }
               }
             }
-          }
-        }
+          },
+          "provenance": false,
+          "citations": {}
+        },
+        "required": ["citations"]
       },
       "else": { "required": ["relations"], "properties": { "relations": {} } }
+    },
+    {
+      "if": { "properties": { "schemaVersion": { "const": 2 } } },
+      "then": {
+        "required": ["citations"],
+        "properties": {
+          "provenance": false,
+          "mechanism": {
+            "properties": {
+              "blocks": {
+                "items": { "$ref": "#/$defs/evidenceMechanismBlock" },
+                "type": "array"
+              }
+            },
+            "type": "object"
+          },
+          "citations": {}
+        }
+      }
+    },
+    {
+      "if": { "properties": { "schemaVersion": { "const": 3 } } },
+      "then": { "required": ["provenance"], "properties": { "provenance": {} } }
     }
   ],
   "$defs": {
@@ -284,6 +321,44 @@
         "type": "object",
         "properties": { "direction": { "const": "undirected" } }
       }
+    },
+    "articleMechanismBlock": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text"],
+          "properties": {
+            "kind": { "const": "text" },
+            "text": { "type": "string", "minLength": 1 },
+            "evidenceRefs": {
+              "type": "array",
+              "maxItems": 3,
+              "items": { "$ref": "#/$defs/evidenceRef" }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind", "text", "assetPath", "alt"],
+          "properties": {
+            "kind": { "enum": ["source_image", "technical_flow_mermaid"] },
+            "text": { "type": "string", "minLength": 1 },
+            "assetPath": {
+              "type": "string",
+              "pattern": "^assets/sha256/[a-f0-9]{64}\\.(?:png|svg)$"
+            },
+            "alt": { "type": "string", "minLength": 1 },
+            "caption": { "type": "string", "minLength": 1 },
+            "evidenceRefs": {
+              "type": "array",
+              "maxItems": 3,
+              "items": { "$ref": "#/$defs/evidenceRef" }
+            }
+          }
+        }
+      ]
     }
   }
 }
